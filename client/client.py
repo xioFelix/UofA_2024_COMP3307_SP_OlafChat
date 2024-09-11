@@ -1,6 +1,6 @@
 import socket
 from protocol.message_format import create_message
-from client.encryption import encrypt_message
+from shared.encryption import encrypt_message
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -17,8 +17,7 @@ class Client:
         self.send_hello()
 
     def receive_public_key(self):
-        # 接收来自服务器的公钥
-        pem_data = self.sock.recv(1024)  # 假设公钥小于1024字节
+        pem_data = self.sock.recv(1024)
         public_key = serialization.load_pem_public_key(pem_data)
         return public_key
 
@@ -49,5 +48,5 @@ class Client:
         self.sock.close()
 
 if __name__ == "__main__":
-    client = Client("127.0.0.1", 8080)  # 假设服务器运行在本地并监听8080端口
+    client = Client("127.0.0.1", 8080)
     client.start()

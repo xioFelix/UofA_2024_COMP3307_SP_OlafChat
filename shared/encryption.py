@@ -7,7 +7,6 @@ import os
 # RSA key generation (in actual application, the key should be pre-generated and safely stored)
 # In this demonstration, suppose you already have the private key of the server and the public key of the client.
 
-# 生成RSA密钥对（如果尚未生成）
 private_key = rsa.generate_private_key(
     public_exponent=65537,
     key_size=2048,
