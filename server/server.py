@@ -2,8 +2,8 @@ import socket
 import logging
 import json
 from cryptography.hazmat.primitives import serialization
-from server.encryption import get_private_key, decrypt_message
 from protocol.message_format import parse_and_verify_message
+from shared.encryption import get_private_key, decrypt_message
 
 # 配置日志
 logging.basicConfig(
