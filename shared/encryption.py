@@ -1,5 +1,3 @@
-# shared/encryption.py
-
 import os
 import base64
 import json
@@ -10,8 +8,11 @@ from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 
-# Load or generate RSA private key
 def load_or_generate_private_key(key_path):
+    """
+    Load an existing RSA private key from the specified path,
+    or generate a new one if it doesn't exist.
+    """
     if os.path.exists(key_path):
         with open(key_path, "rb") as key_file:
             private_key = serialization.load_pem_private_key(
@@ -31,14 +32,18 @@ def load_or_generate_private_key(key_path):
     return private_key
 
 
-# Load RSA public key from PEM data
 def load_public_key(pem_data):
+    """
+    Load an RSA public key from PEM data.
+    """
     public_key = serialization.load_pem_public_key(pem_data)
     return public_key
 
 
-# Serialize RSA public key to PEM format
 def serialize_public_key(public_key):
+    """
+    Serialize an RSA public key to PEM format.
+    """
     public_key_pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo,
@@ -46,8 +51,10 @@ def serialize_public_key(public_key):
     return public_key_pem
 
 
-# RSA encrypt
 def rsa_encrypt(public_key, data):
+    """
+    Encrypt data using RSA public key encryption.
+    """
     encrypted = public_key.encrypt(
         data,
         padding.OAEP(
@@ -59,8 +66,10 @@ def rsa_encrypt(public_key, data):
     return encrypted
 
 
-# RSA decrypt
 def rsa_decrypt(private_key, encrypted_data):
+    """
+    Decrypt data using RSA private key decryption.
+    """
     decrypted = private_key.decrypt(
         encrypted_data,
         padding.OAEP(
@@ -72,8 +81,10 @@ def rsa_decrypt(private_key, encrypted_data):
     return decrypted
 
 
-# AES encrypt
 def aes_encrypt(aes_key, plaintext):
+    """
+    Encrypt plaintext using AES symmetric encryption.
+    """
     iv = os.urandom(16)
     padder = sym_padding.PKCS7(128).padder()
     padded_data = padder.update(plaintext) + padder.finalize()
@@ -83,8 +94,10 @@ def aes_encrypt(aes_key, plaintext):
     return iv, encrypted
 
 
-# AES decrypt
 def aes_decrypt(aes_key, iv, ciphertext):
+    """
+    Decrypt ciphertext using AES symmetric decryption.
+    """
     cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
     decryptor = cipher.decryptor()
     padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
@@ -93,13 +106,17 @@ def aes_decrypt(aes_key, iv, ciphertext):
     return plaintext
 
 
-# Generate AES key
 def generate_aes_key():
+    """
+    Generate a random AES key.
+    """
     return os.urandom(32)
 
 
-# Sign message
 def sign_message(private_key, message):
+    """
+    Sign a message using RSA private key.
+    """
     signature = private_key.sign(
         message.encode("utf-8"),
         padding.PSS(
@@ -111,8 +128,10 @@ def sign_message(private_key, message):
     return base64.b64encode(signature).decode("utf-8")
 
 
-# Verify signature
 def verify_signature(public_key, message, signature):
+    """
+    Verify a message signature using RSA public key.
+    """
     try:
         signature_bytes = base64.b64decode(signature)
         public_key.verify(
@@ -131,8 +150,10 @@ def verify_signature(public_key, message, signature):
         return False
 
 
-# Encrypt message with AES and RSA
 def encrypt_message(message, recipient_public_key):
+    """
+    Encrypt a message using the recipient's public key and AES symmetric encryption.
+    """
     aes_key = generate_aes_key()
     iv, encrypted_message = aes_encrypt(aes_key, message.encode())
     encrypted_key = rsa_encrypt(recipient_public_key, aes_key)
@@ -144,8 +165,10 @@ def encrypt_message(message, recipient_public_key):
     return json.dumps(message_package)
 
 
-# Decrypt message with AES and RSA
 def decrypt_message(message_package_json, private_key):
+    """
+    Decrypt a received message using the recipient's private key and AES symmetric decryption.
+    """
     message_package = json.loads(message_package_json)
     encrypted_key = base64.b64decode(message_package["encrypted_key"])
     iv = base64.b64decode(message_package["iv"])

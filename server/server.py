@@ -2,10 +2,13 @@ import socket
 import threading
 import logging
 import json
+import os
+import base64
 from shared.encryption import (
     load_or_generate_private_key,
     load_public_key,
     serialize_public_key,
+    encrypt_message,
     decrypt_message,
     verify_signature,
 )
@@ -13,15 +16,20 @@ from auth import UserManager
 
 logging.basicConfig(level=logging.INFO)
 
-# 全局用户管理器
+# Global user manager
 user_manager = UserManager("user_data.json")
 
-# 全局在线用户集合和客户端连接字典
+# Global online users set and client connections dictionary
 online_users = set()
 client_connections = {}
+client_handlers = {}  # Store ClientHandler instances
 
 
 class ClientHandler(threading.Thread):
+    """
+    Handles communication with a connected client.
+    """
+
     def __init__(self, client_socket, address, server_private_key):
         threading.Thread.__init__(self)
         self.client_socket = client_socket
@@ -30,18 +38,19 @@ class ClientHandler(threading.Thread):
         self.client_public_key = None
         self.username = None
         self.logged_in = False
+        self.lock = threading.Lock()
 
     def run(self):
         try:
             logging.info(f"Handling client {self.address}")
 
-            # 发送服务器的公钥
+            # Send server's public key
             server_public_key_pem = serialize_public_key(
                 self.server_private_key.public_key()
             )
             self.client_socket.sendall(server_public_key_pem)
 
-            # 接收客户端的公钥和用户名
+            # Receive client's public key and username
             data = self.client_socket.recv(8192)
             message = data.decode("utf-8")
             message = json.loads(message)
@@ -51,7 +60,7 @@ class ClientHandler(threading.Thread):
                 client_public_key_pem = message["public_key"].encode("utf-8")
                 self.client_public_key = load_public_key(client_public_key_pem)
 
-                # 注册用户
+                # Register user
                 if user_manager.register_user(
                     self.username, client_public_key_pem.decode("utf-8")
                 ):
@@ -76,7 +85,7 @@ class ClientHandler(threading.Thread):
                 client_public_key_pem = message["public_key"].encode("utf-8")
                 self.client_public_key = load_public_key(client_public_key_pem)
 
-                # 验证用户
+                # Validate user
                 stored_public_key_pem = user_manager.get_user_public_key(self.username)
                 if (
                     stored_public_key_pem
@@ -105,14 +114,15 @@ class ClientHandler(threading.Thread):
                 return
 
             if self.logged_in:
-                # 用户成功登录，添加到在线用户列表和连接字典
+                # User successfully logged in, add to online users and connections
                 online_users.add(self.username)
                 client_connections[self.username] = self.client_socket
+                client_handlers[self.username] = self
                 logging.info(
                     f"User {self.username} logged in. Online users: {online_users}"
                 )
 
-            # 主循环，处理客户端消息
+            # Main loop to handle client messages
             while self.logged_in:
                 data = self.client_socket.recv(8192)
                 if not data:
@@ -123,32 +133,43 @@ class ClientHandler(threading.Thread):
                 )
                 message = json.loads(message_json)
 
-                # 验证签名
+                # Verify signature
                 signature = message.get("signature")
                 content = message.get("content")
                 if not verify_signature(self.client_public_key, content, signature):
                     logging.warning("Signature verification failed.")
                     continue
 
-                # 解析消息内容
+                # Parse message content
                 content_data = json.loads(content)
 
-                # 根据消息类型进行处理
+                # Handle message based on type
                 msg_type = content_data.get("type")
                 if msg_type == "list_users":
                     self.handle_list_users()
                 elif msg_type == "broadcast":
                     self.handle_broadcast(content_data.get("body"))
+                elif msg_type == "private_message":
+                    self.handle_private_message(content_data)
+                elif msg_type == "get_public_key":
+                    self.handle_get_public_key(content_data)
+                elif msg_type == "shared_key":
+                    self.handle_shared_key(content_data)
+                elif msg_type == "upload":
+                    self.handle_file_upload(content_data)
+                elif msg_type == "download":
+                    self.handle_file_download(content_data)
                 else:
                     self.handle_message(content_data)
 
         except Exception as e:
             logging.error(f"Error handling client {self.address}: {e}")
         finally:
-            # 用户断开连接，从在线用户列表中移除
+            # Remove user from online users upon disconnection
             if self.username in online_users:
                 online_users.remove(self.username)
                 client_connections.pop(self.username, None)
+                client_handlers.pop(self.username, None)
                 logging.info(
                     f"User {self.username} disconnected. Online users: {online_users}"
                 )
@@ -156,16 +177,27 @@ class ClientHandler(threading.Thread):
             logging.info(f"Connection with {self.address} closed.")
 
     def send_response(self, response):
+        """
+        Send a response to the client.
+        """
         response_json = json.dumps(response)
-        self.client_socket.sendall(response_json.encode("utf-8"))
+        encrypted_response = encrypt_message(response_json, self.client_public_key)
+        with self.lock:
+            self.client_socket.sendall(encrypted_response.encode("utf-8"))
 
     def handle_list_users(self):
+        """
+        Handle a request for the list of online users.
+        """
         user_list = list(online_users)
         response = {"type": "user_list", "users": user_list}
         self.send_response(response)
 
     def handle_broadcast(self, message_body):
-        # 构建广播消息
+        """
+        Handle broadcasting a message to all online users.
+        """
+        # Construct the broadcast message
         broadcast_message = {
             "type": "broadcast",
             "from": self.username,
@@ -173,22 +205,160 @@ class ClientHandler(threading.Thread):
         }
         message_json = json.dumps(broadcast_message)
 
-        # 向所有在线客户端发送消息
-        for username, conn in client_connections.items():
+        # Send the message to all connected clients except the sender
+        for username, handler in client_handlers.items():
             if username != self.username:
                 try:
-                    conn.sendall(message_json.encode("utf-8"))
+                    handler.send_raw_message(message_json)
                 except Exception as e:
                     logging.error(f"Error sending broadcast to {username}: {e}")
 
+    def handle_private_message(self, content_data):
+        """
+        Handle forwarding a private message to a specific user.
+        """
+        recipient = content_data.get("to")
+        encrypted_message = content_data.get("message")
+
+        if recipient in client_handlers:
+            try:
+                # Forward the message to the recipient
+                private_message = {
+                    "type": "private_message",
+                    "from": self.username,
+                    "message": encrypted_message,
+                }
+                message_json = json.dumps(private_message)
+                recipient_handler = client_handlers[recipient]
+                recipient_handler.send_raw_message(message_json)
+                logging.info(
+                    f"Forwarded private message from {self.username} to {recipient}"
+                )
+            except Exception as e:
+                logging.error(f"Error forwarding private message to {recipient}: {e}")
+        else:
+            # Recipient is not online
+            response = {
+                "status": "error",
+                "message": f"User {recipient} is not online.",
+            }
+            self.send_response(response)
+
+    def handle_get_public_key(self, content_data):
+        """
+        Handle a request to get another user's public key.
+        """
+        target_user = content_data.get("username")
+        public_key_pem = user_manager.get_user_public_key(target_user)
+        if public_key_pem:
+            response = {
+                "type": "public_key",
+                "username": target_user,
+                "public_key": public_key_pem,
+            }
+        else:
+            response = {"status": "error", "message": f"User {target_user} not found."}
+        self.send_response(response)
+
+    def handle_shared_key(self, content_data):
+        """
+        Handle forwarding an encrypted shared key to another user.
+        """
+        recipient = content_data.get("to")
+        encrypted_shared_key = content_data.get("encrypted_shared_key")
+
+        if recipient in client_handlers:
+            try:
+                # Forward the encrypted shared key to the recipient
+                shared_key_message = {
+                    "type": "shared_key",
+                    "from": self.username,
+                    "encrypted_shared_key": encrypted_shared_key,
+                }
+                message_json = json.dumps(shared_key_message)
+                recipient_handler = client_handlers[recipient]
+                recipient_handler.send_raw_message(message_json)
+                logging.info(
+                    f"Forwarded shared key from {self.username} to {recipient}"
+                )
+            except Exception as e:
+                logging.error(f"Error forwarding shared key to {recipient}: {e}")
+        else:
+            # Recipient is not online
+            response = {
+                "status": "error",
+                "message": f"User {recipient} is not online.",
+            }
+            self.send_response(response)
+
+    def handle_file_upload(self, content_data):
+        """
+        Handle file upload from a client.
+        """
+        filename = content_data.get("filename")
+        file_data_b64 = content_data.get("file_data")
+        file_data = base64.b64decode(file_data_b64)
+
+        # Save the file to server_files directory
+        save_path = os.path.join("server_files", filename)
+        os.makedirs("server_files", exist_ok=True)
+        with open(save_path, "wb") as f:
+            f.write(file_data)
+        logging.info(
+            f"File {filename} uploaded by {self.username} and saved to {save_path}"
+        )
+
+        response = {
+            "status": "success",
+            "message": f"File {filename} uploaded successfully.",
+        }
+        self.send_response(response)
+
+    def handle_file_download(self, content_data):
+        """
+        Handle file download request from a client.
+        """
+        filename = content_data.get("filename")
+        file_path = os.path.join("server_files", filename)
+        if os.path.exists(file_path):
+            with open(file_path, "rb") as f:
+                file_data = f.read()
+            file_data_b64 = base64.b64encode(file_data).decode("utf-8")
+            response = {
+                "type": "file_data",
+                "filename": filename,
+                "file_data": file_data_b64,
+            }
+            self.send_response(response)
+            logging.info(f"Sent file {filename} to {self.username}")
+        else:
+            response = {
+                "status": "error",
+                "message": f"File {filename} not found on server.",
+            }
+            self.send_response(response)
+
     def handle_message(self, content_data):
-        # 处理其他类型的消息
+        """
+        Handle other types of messages.
+        """
         logging.info(f"Received message from {self.username}: {content_data}")
         response = {"status": "success", "message": "Message received."}
         self.send_response(response)
 
+    def send_raw_message(self, message_json):
+        """
+        Send a raw message to the client without additional wrapping.
+        """
+        encrypted_message = encrypt_message(message_json, self.client_public_key)
+        with self.lock:
+            self.client_socket.sendall(encrypted_message.encode("utf-8"))
+
 
 def start_server(host="0.0.0.0", port=8080):
+    """
+    Start the chat server.
+    """
     server_private_key = load_or_generate_private_key("server_private_key.pem")
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.bind((host, port))
