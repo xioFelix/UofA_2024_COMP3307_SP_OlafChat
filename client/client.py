@@ -55,6 +55,18 @@ class Client:
         self.server_public_key = load_public_key(server_public_key_pem)
         logging.info("Received server public key.")
 
+    def recvall(self, n):
+        """
+        Helper function to receive n bytes or return None if EOF is hit.
+        """
+        data = bytearray()
+        while len(data) < n:
+            packet = self.socket.recv(n - len(data))
+            if not packet:
+                return None
+            data.extend(packet)
+        return data
+
     def register_or_login(self):
         """
         Prompt the user to register or login.
@@ -90,7 +102,17 @@ class Client:
         self.socket.sendall(json.dumps(message).encode("utf-8"))
 
         # Receive and decrypt the response from the server
-        response_data = self.socket.recv(8192)
+        raw_msglen = self.recvall(4)
+        if not raw_msglen:
+            print("Connection closed by server.")
+            self.socket.close()
+            return False
+        response_length = int.from_bytes(raw_msglen, byteorder="big")
+        response_data = self.recvall(response_length)
+        if not response_data:
+            print("Connection closed by server.")
+            self.socket.close()
+            return False
         decrypted_response = decrypt_message(
             response_data.decode("utf-8"), self.private_key
         )
@@ -116,8 +138,12 @@ class Client:
 
         # Encrypt the message
         encrypted_message = encrypt_message(message_json, self.server_public_key)
+        encrypted_message_bytes = encrypted_message.encode("utf-8")
+        message_length = len(encrypted_message_bytes)
+        # Send the length of the message first
         with self.lock:
-            self.socket.sendall(encrypted_message.encode("utf-8"))
+            self.socket.sendall(message_length.to_bytes(4, byteorder="big"))
+            self.socket.sendall(encrypted_message_bytes)
 
     def receive_messages(self):
         """
@@ -125,10 +151,19 @@ class Client:
         """
         while self.logged_in:
             try:
-                data = self.socket.recv(8192)
-                if not data:
+                # Read the message length first
+                raw_msglen = self.recvall(4)
+                if not raw_msglen:
                     break
-                decrypted_data = decrypt_message(data.decode("utf-8"), self.private_key)
+                message_length = int.from_bytes(raw_msglen, byteorder="big")
+                # Now read the message data
+                encrypted_data = self.recvall(message_length)
+                if not encrypted_data:
+                    break
+
+                decrypted_data = decrypt_message(
+                    encrypted_data.decode("utf-8"), self.private_key
+                )
                 response = json.loads(decrypted_data)
                 msg_type = response.get("type")
                 if msg_type == "user_list":
@@ -156,6 +191,12 @@ class Client:
                     filename = response.get("filename")
                     file_data_b64 = response.get("file_data")
                     self.receive_file(filename, file_data_b64)
+                elif msg_type == "notification":
+                    message = response.get("message")
+                    print(f"\n[Notification]: {message}")
+                elif msg_type == "file_list":
+                    files = response.get("files")
+                    print(f"\nDownloadable files: {files}")
                 else:
                     print(f"\nServer response: {response}")
                 # Re-display the prompt
@@ -213,13 +254,14 @@ class Client:
                     else:
                         print("Usage: /msg <username> <message>")
                 elif message.startswith("/upload "):
-                    # Upload file: /upload <filename>
-                    parts = message.split(" ", 1)
-                    if len(parts) == 2:
+                    # Upload file: /upload <filename> [recipient]
+                    parts = message.split(" ", 2)
+                    if len(parts) >= 2:
                         filename = parts[1]
-                        self.upload_file(filename)
+                        recipient = parts[2] if len(parts) == 3 else None
+                        self.upload_file(filename, recipient)
                     else:
-                        print("Usage: /upload <filename>")
+                        print("Usage: /upload <filename> [recipient]")
                 elif message.startswith("/download "):
                     # Download file: /download <filename>
                     parts = message.split(" ", 1)
@@ -228,6 +270,11 @@ class Client:
                         self.download_file(filename)
                     else:
                         print("Usage: /download <filename>")
+                elif message.lower() == "/files":
+                    # Request file list
+                    content_data = {"type": "file_list"}
+                    content = json.dumps(content_data)
+                    self.send_message(content)
                 elif message.lower() == "/help":
                     self.show_help()
                 else:
@@ -347,7 +394,7 @@ class Client:
         self.shared_keys[sender] = shared_key
         print(f"\nEstablished shared key with {sender}.")
 
-    def upload_file(self, filename):
+    def upload_file(self, filename, recipient=None):
         """
         Upload a file to the server.
         """
@@ -359,10 +406,14 @@ class Client:
                 "type": "upload",
                 "filename": os.path.basename(filename),
                 "file_data": file_data_b64,
+                "recipient": recipient,  # None means public
             }
             content = json.dumps(content_data)
             self.send_message(content)
-            print(f"Uploading file {filename}...")
+            if recipient:
+                print(f"Uploading file {filename} to {recipient}...")
+            else:
+                print(f"Uploading file {filename} publicly...")
         except FileNotFoundError:
             print(f"File {filename} not found.")
 
@@ -380,11 +431,12 @@ class Client:
         Receive a file from the server and save it locally.
         """
         file_data = base64.b64decode(file_data_b64)
-        save_path = os.path.join("client_files", filename)
-        os.makedirs("client_files", exist_ok=True)
+        directory = f"{self.username}_files"
+        save_path = os.path.join(directory, filename)
+        os.makedirs(directory, exist_ok=True)
         with open(save_path, "wb") as f:
             f.write(file_data)
-        print(f"\nFile {filename} downloaded and saved to client_files/{filename}.")
+        print(f"\nFile {filename} downloaded and saved to {directory}/{filename}.")
 
     def show_help(self):
         """
@@ -395,8 +447,9 @@ Available commands:
 /list                     - Show online users.
 /all <message>            - Send a broadcast message.
 /msg <user> <message>     - Send a private message to a user.
-/upload <filename>        - Upload a file to the server.
+/upload <filename> [user] - Upload a file to a user or publicly.
 /download <filename>      - Download a file from the server.
+/files                    - Show list of downloadable files.
 /help                     - Show this help message.
 quit                      - Exit the chat.
 """

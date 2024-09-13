@@ -24,6 +24,9 @@ online_users = set()
 client_connections = {}
 client_handlers = {}  # Store ClientHandler instances
 
+# Global file permissions dictionary
+file_permissions = {}  # Stores {filename: {'owner': username, 'recipient': recipient}}
+
 
 class ClientHandler(threading.Thread):
     """
@@ -39,6 +42,18 @@ class ClientHandler(threading.Thread):
         self.username = None
         self.logged_in = False
         self.lock = threading.Lock()
+
+    def recvall(self, n):
+        """
+        Helper function to receive n bytes or return None if EOF is hit.
+        """
+        data = bytearray()
+        while len(data) < n:
+            packet = self.client_socket.recv(n - len(data))
+            if not packet:
+                return None
+            data.extend(packet)
+        return data
 
     def run(self):
         try:
@@ -124,12 +139,18 @@ class ClientHandler(threading.Thread):
 
             # Main loop to handle client messages
             while self.logged_in:
-                data = self.client_socket.recv(8192)
-                if not data:
+                # Read the message length first
+                raw_msglen = self.recvall(4)
+                if not raw_msglen:
+                    break
+                message_length = int.from_bytes(raw_msglen, byteorder="big")
+                # Now read the message data
+                encrypted_message = self.recvall(message_length)
+                if not encrypted_message:
                     break
 
                 message_json = decrypt_message(
-                    data.decode("utf-8"), self.server_private_key
+                    encrypted_message.decode("utf-8"), self.server_private_key
                 )
                 message = json.loads(message_json)
 
@@ -159,6 +180,8 @@ class ClientHandler(threading.Thread):
                     self.handle_file_upload(content_data)
                 elif msg_type == "download":
                     self.handle_file_download(content_data)
+                elif msg_type == "file_list":
+                    self.handle_file_list()
                 else:
                     self.handle_message(content_data)
 
@@ -182,8 +205,11 @@ class ClientHandler(threading.Thread):
         """
         response_json = json.dumps(response)
         encrypted_response = encrypt_message(response_json, self.client_public_key)
+        encrypted_response_bytes = encrypted_response.encode("utf-8")
+        response_length = len(encrypted_response_bytes)
         with self.lock:
-            self.client_socket.sendall(encrypted_response.encode("utf-8"))
+            self.client_socket.sendall(response_length.to_bytes(4, byteorder="big"))
+            self.client_socket.sendall(encrypted_response_bytes)
 
     def handle_list_users(self):
         """
@@ -297,6 +323,7 @@ class ClientHandler(threading.Thread):
         """
         filename = content_data.get("filename")
         file_data_b64 = content_data.get("file_data")
+        recipient = content_data.get("recipient")  # None means public
         file_data = base64.b64decode(file_data_b64)
 
         # Save the file to server_files directory
@@ -308,11 +335,50 @@ class ClientHandler(threading.Thread):
             f"File {filename} uploaded by {self.username} and saved to {save_path}"
         )
 
+        # Store file permissions
+        file_permissions[filename] = {
+            "owner": self.username,
+            "recipient": recipient,  # None means public
+        }
+
         response = {
             "status": "success",
             "message": f"File {filename} uploaded successfully.",
         }
         self.send_response(response)
+
+        # Notify recipient if file is private
+        if recipient:
+            if recipient in client_handlers:
+                try:
+                    notification = {
+                        "type": "notification",
+                        "message": f"{self.username} has uploaded a file '{filename}' for you.",
+                    }
+                    message_json = json.dumps(notification)
+                    recipient_handler = client_handlers[recipient]
+                    recipient_handler.send_raw_message(message_json)
+                    logging.info(
+                        f"Sent file upload notification to {recipient} for file '{filename}'"
+                    )
+                except Exception as e:
+                    logging.error(f"Error sending notification to {recipient}: {e}")
+        else:
+            # Notify all users about the new public file
+            notification = {
+                "type": "notification",
+                "message": f"{self.username} has uploaded a new public file '{filename}'.",
+            }
+            message_json = json.dumps(notification)
+            for username, handler in client_handlers.items():
+                if username != self.username:
+                    try:
+                        handler.send_raw_message(message_json)
+                        logging.info(
+                            f"Sent public file upload notification to {username} for file '{filename}'"
+                        )
+                    except Exception as e:
+                        logging.error(f"Error sending notification to {username}: {e}")
 
     def handle_file_download(self, content_data):
         """
@@ -321,6 +387,29 @@ class ClientHandler(threading.Thread):
         filename = content_data.get("filename")
         file_path = os.path.join("server_files", filename)
         if os.path.exists(file_path):
+            # Check file permissions
+            permissions = file_permissions.get(filename)
+            if permissions:
+                recipient = permissions.get("recipient")
+                if (
+                    recipient
+                    and recipient != self.username
+                    and permissions.get("owner") != self.username
+                ):
+                    response = {
+                        "status": "error",
+                        "message": f"You do not have permission to download {filename}.",
+                    }
+                    self.send_response(response)
+                    return
+            else:
+                response = {
+                    "status": "error",
+                    "message": f"File permissions not found for {filename}.",
+                }
+                self.send_response(response)
+                return
+
             with open(file_path, "rb") as f:
                 file_data = f.read()
             file_data_b64 = base64.b64encode(file_data).decode("utf-8")
@@ -338,6 +427,22 @@ class ClientHandler(threading.Thread):
             }
             self.send_response(response)
 
+    def handle_file_list(self):
+        """
+        Handle a request to get the list of downloadable files for the user.
+        """
+        user_files = []
+        for filename, permissions in file_permissions.items():
+            # File is public, or user is the recipient or owner
+            if (
+                permissions["recipient"] is None
+                or permissions["recipient"] == self.username
+                or permissions["owner"] == self.username
+            ):
+                user_files.append(filename)
+        response = {"type": "file_list", "files": user_files}
+        self.send_response(response)
+
     def handle_message(self, content_data):
         """
         Handle other types of messages.
@@ -351,8 +456,11 @@ class ClientHandler(threading.Thread):
         Send a raw message to the client without additional wrapping.
         """
         encrypted_message = encrypt_message(message_json, self.client_public_key)
+        encrypted_message_bytes = encrypted_message.encode("utf-8")
+        message_length = len(encrypted_message_bytes)
         with self.lock:
-            self.client_socket.sendall(encrypted_message.encode("utf-8"))
+            self.client_socket.sendall(message_length.to_bytes(4, byteorder="big"))
+            self.client_socket.sendall(encrypted_message_bytes)
 
 
 def start_server(host="0.0.0.0", port=8080):
