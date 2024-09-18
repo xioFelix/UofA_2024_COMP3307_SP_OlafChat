@@ -13,7 +13,7 @@ def create_message(message_type, data, private_key, counter):
         "counter": counter
     }
     
-    # 如果是 hello 消息，需要包含公钥
+    # If it is a hello message, it needs to contain the public key
     if message_type == "hello":
         public_key = private_key.public_key()
         public_key_pem = public_key.public_bytes(
@@ -22,7 +22,7 @@ def create_message(message_type, data, private_key, counter):
         )
         message["data"]["public_key"] = public_key_pem.decode()
 
-    # 创建签名
+    # Create a signature
     message_bytes = json.dumps(message["data"]).encode() + str(counter).encode()
     signature = private_key.sign(
         message_bytes,
