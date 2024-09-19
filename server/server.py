@@ -245,6 +245,7 @@ class ClientHandler(threading.Thread):
         """
         recipient = content_data.get("to")
         encrypted_message = content_data.get("message")
+        counter = content_data.get("counter") # Counter for replay attack prevention
 
         if recipient in client_handlers:
             try:
@@ -253,6 +254,7 @@ class ClientHandler(threading.Thread):
                     "type": "private_message",
                     "from": self.username,
                     "message": encrypted_message,
+                    "counter": counter 
                 }
                 message_json = json.dumps(private_message)
                 recipient_handler = client_handlers[recipient]

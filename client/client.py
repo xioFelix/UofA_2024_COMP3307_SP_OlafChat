@@ -41,6 +41,8 @@ class Client:
         self.shared_keys = {}  # Store shared keys with other users
         self.lock = threading.Lock()
         self.message_queue = []  # Queue for outgoing messages
+        self.message_counters = {}  # store message counters
+        self.received_counters = {}  # store received counters
 
     def connect(self):
         """
@@ -180,8 +182,9 @@ class Client:
                 elif msg_type == "private_message":
                     sender = response.get("from")
                     encrypted_message = response.get("message")
-                    # Decrypt the message content
-                    message = self.decrypt_private_message(sender, encrypted_message)
+                    counter = response.get("counter")  # get the counter value
+                    # Decrypt the message content, including the counter value
+                    message = self.decrypt_private_message(sender, encrypted_message, counter)
                     print(f"\n[Private] {sender}: {message}")
                 elif msg_type == "broadcast":
                     sender = response.get("from")
@@ -306,6 +309,15 @@ class Client:
         else:
             shared_key = self.shared_keys[recipient]
 
+        # check if the recipient has a message counter, if not, initialize it to 0
+        if recipient not in self.message_counters:
+            self.message_counters[recipient] = 0
+
+        # get the current counter value
+        counter = self.message_counters[recipient]
+        # send the message and increment the counter
+        self.message_counters[recipient] += 1
+
         # Encrypt the message using the shared key
         iv, encrypted_message = aes_encrypt(shared_key, message_body.encode())
         encrypted_message_b64 = base64.b64encode(iv + encrypted_message).decode("utf-8")
@@ -314,11 +326,12 @@ class Client:
             "type": "private_message",
             "to": recipient,
             "message": encrypted_message_b64,
+            "counter": counter  # 附加计数器值
         }
         content = json.dumps(content_data)
         self.send_message(content)
 
-    def decrypt_private_message(self, sender, encrypted_message_b64):
+    def decrypt_private_message(self, sender, encrypted_message_b64, counter):
         """
         Decrypt a received private message.
         """
@@ -328,6 +341,19 @@ class Client:
             return "<Encrypted Message>"
 
         shared_key = self.shared_keys[sender]
+
+        # check if the sender has a received counter, if not, initialize it to -1
+        if sender not in self.received_counters:
+            #   -1 means no message received yet
+            self.received_counters[sender] = -1
+
+        # check the received counter
+        if counter <= self.received_counters[sender]:
+            print(f"Replay attack detected from {sender}. Message discarded.")
+            return "<Replay Attack Detected>"
+
+        # update the received counter
+        self.received_counters[sender] = counter
 
         # Decrypt the message
         encrypted_data = base64.b64decode(encrypted_message_b64)
