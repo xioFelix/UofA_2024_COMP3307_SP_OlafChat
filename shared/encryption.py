@@ -115,7 +115,7 @@ def sign_message(private_key, message):
         message.encode("utf-8"),
         padding.PSS(
             mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.MAX_LENGTH,
+            salt_length=32,
         ),
         hashes.SHA256(),
     )
@@ -133,7 +133,7 @@ def verify_signature(public_key, message, signature):
             message.encode("utf-8"),
             padding.PSS(
                 mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.MAX_LENGTH,
+                salt_length=32,
             ),
             hashes.SHA256(),
         )
@@ -144,13 +144,33 @@ def verify_signature(public_key, message, signature):
         return False
 
 
-def encrypt_message(message, recipient_public_key):
+def encrypt_message(data, private_key, recipient_public_key, counter):
     """
-    Encrypt a message using the recipient's public key and AES symmetric encryption.
+    Sign and encrypt a message according to the protocol specification.
     """
+    # Prepare the data field
+    data_field = {"type": data["type"], "data": data["data"]}
+
+    # Convert data and counter to JSON string
+    data_string = json.dumps(data_field)
+    message_to_sign = data_string + str(counter)
+
+    # Sign the message
+    signature = sign_message(private_key, message_to_sign)
+
+    # Construct the message
+    message = {
+        "type": "signed_data",
+        "data": data["data"],
+        "counter": counter,
+        "signature": signature,
+    }
+
+    # Encrypt the message
     aes_key = generate_aes_key()
-    iv, encrypted_message = aes_encrypt(aes_key, message.encode())
+    iv, encrypted_message = aes_encrypt(aes_key, json.dumps(message).encode())
     encrypted_key = rsa_encrypt(recipient_public_key, aes_key)
+
     message_package = {
         "encrypted_key": base64.b64encode(encrypted_key).decode("utf-8"),
         "iv": base64.b64encode(iv).decode("utf-8"),
@@ -161,7 +181,7 @@ def encrypt_message(message, recipient_public_key):
 
 def decrypt_message(message_package_json, private_key):
     """
-    Decrypt a received message using the recipient's private key and AES symmetric decryption.
+    Decrypt and verify a received message according to the protocol specification.
     """
     message_package = json.loads(message_package_json)
     encrypted_key = base64.b64decode(message_package["encrypted_key"])
@@ -170,4 +190,18 @@ def decrypt_message(message_package_json, private_key):
 
     aes_key = rsa_decrypt(private_key, encrypted_key)
     plaintext = aes_decrypt(aes_key, iv, encrypted_message)
-    return plaintext.decode("utf-8")
+
+    # Parse the decrypted message
+    message = json.loads(plaintext.decode("utf-8"))
+
+    # Verify the signature
+    data_string = json.dumps({"type": message["type"], "data": message["data"]})
+    message_to_verify = data_string + str(message["counter"])
+    sender_public_key = ...  # Retrieve the sender's public key
+    if verify_signature(sender_public_key, message_to_verify, message["signature"]):
+        logging.info("Message signature verified.")
+    else:
+        logging.error("Invalid message signature.")
+        return None
+
+    return message
