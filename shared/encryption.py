@@ -6,7 +6,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives import padding as sym_padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 def load_or_generate_private_key(key_path):
     """
@@ -83,26 +83,20 @@ def rsa_decrypt(private_key, encrypted_data):
 
 def aes_encrypt(aes_key, plaintext):
     """
-    Encrypt plaintext using AES symmetric encryption.
+    Encrypt plaintext using AES-GCM symmetric encryption.
     """
+    aesgcm = AESGCM(aes_key)
     iv = os.urandom(16)
-    padder = sym_padding.PKCS7(128).padder()
-    padded_data = padder.update(plaintext) + padder.finalize()
-    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
-    encryptor = cipher.encryptor()
-    encrypted = encryptor.update(padded_data) + encryptor.finalize()
+    encrypted = aesgcm.encrypt(iv, plaintext, None)
     return iv, encrypted
 
 
 def aes_decrypt(aes_key, iv, ciphertext):
     """
-    Decrypt ciphertext using AES symmetric decryption.
+    Decrypt ciphertext using AES-GCM symmetric decryption.
     """
-    cipher = Cipher(algorithms.AES(aes_key), modes.CBC(iv))
-    decryptor = cipher.decryptor()
-    padded_plaintext = decryptor.update(ciphertext) + decryptor.finalize()
-    unpadder = sym_padding.PKCS7(128).unpadder()
-    plaintext = unpadder.update(padded_plaintext) + unpadder.finalize()
+    aesgcm = AESGCM(aes_key)
+    plaintext = aesgcm.decrypt(iv, ciphertext, None)
     return plaintext
 
 
