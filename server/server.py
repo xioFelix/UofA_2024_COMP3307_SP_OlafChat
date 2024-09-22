@@ -12,7 +12,7 @@ from shared.encryption import (
     decrypt_message,
     verify_signature,
 )
-from server.auth import UserManager
+from auth import UserManager
 
 logging.basicConfig(level=logging.INFO)
 
