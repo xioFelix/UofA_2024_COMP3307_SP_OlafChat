@@ -184,7 +184,9 @@ class Client:
                     encrypted_message = response.get("message")
                     counter = response.get("counter")  # get the counter value
                     # Decrypt the message content, including the counter value
-                    message = self.decrypt_private_message(sender, encrypted_message, counter)
+                    message = self.decrypt_private_message(
+                        sender, encrypted_message, counter
+                    )
                     print(f"\n[Private] {sender}: {message}")
                 elif msg_type == "broadcast":
                     sender = response.get("from")
@@ -326,7 +328,7 @@ class Client:
             "type": "private_message",
             "to": recipient,
             "message": encrypted_message_b64,
-            "counter": counter  # 附加计数器值
+            "counter": counter,  # 附加计数器值
         }
         content = json.dumps(content_data)
         self.send_message(content)
