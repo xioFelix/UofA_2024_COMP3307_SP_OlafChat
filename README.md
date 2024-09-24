@@ -1,286 +1,215 @@
+# OLAF/Neighbourhood Protocol v1.1.1 Chat Server
 
-# OLAF Chat System
+This project implements a decentralized, encrypted chat server using the OLAF/Neighbourhood Protocol. The server uses RSA for key exchange, AES-GCM for secure communication, and WebSockets for real-time communication. This implementation allows clients to send messages through their home server, and messages can travel between interconnected servers within a neighborhood. 
 
-## Overview
-
-The OLAF Chat System is a secure, distributed chat application that facilitates encrypted communication between users. It employs AES encryption, RSA key exchange, and digital signatures to ensure confidentiality, integrity, and authentication of messages. This project is part of an Advanced Secure Programming assignment, focusing on secure communication protocols and ethical vulnerabilities.
+Clients can only connect to their home server and communicate with users on the same server or on servers directly connected to their home server.
 
 ## Features
 
-- **Secure Client-Server Communication**: Encrypted messaging between clients and servers using a distributed architecture.
-- **AES Encryption**: Messages are encrypted using AES in CFB mode, ensuring confidentiality during transmission.
-- **RSA Key Exchange**: Clients and servers use RSA for secure exchange of AES session keys.
-- **Authentication**: Servers authenticate clients upon connection using RSA-signed messages.
-- **Replay Attack Prevention**: Messages are protected against replay attacks using a counter mechanism.
-- **Digital Signatures**: Ensures message integrity and authenticity by signing messages with RSA.
-- **Private Messaging**: Users can send encrypted private messages to specific users.
-- **Broadcast Messaging**: Send messages to all online users.
-- **File Transfer**: Upload and download files securely, with options for public or private sharing.
-- **Notifications**: Users receive notifications when new public files are uploaded or when they receive private files.
-- **Downloadable File List**: Users can request a list of files available for them to download.
+- **End-to-End Encryption**: Messages are secured using RSA for key exchange and AES-GCM for encryption.
+- **Replay Attack Prevention**: Signed messages with a monotonically increasing counter prevent replay attacks.
+- **Decentralized Topology**: Servers form a neighborhood, and users can communicate across servers.
+- **Private and Group Messaging**: Clients can send encrypted messages directly to other users or to a group.
+- **File Upload and Download**: Support for file uploads and downloads via HTTP.
+- **Server Synchronization**: Servers sync their connected clients with each other.
 
-## Getting Started
+## Table of Contents
+
+- [OLAF/Neighbourhood Protocol v1.1.1 Chat Server](#olafneighbourhood-protocol-v111-chat-server)
+  - [Features](#features)
+  - [Table of Contents](#table-of-contents)
+  - [Installation](#installation)
+    - [Prerequisites](#prerequisites)
+    - [Install Dependencies](#install-dependencies)
+  - [Usage](#usage)
+    - [Starting the Server](#starting-the-server)
+    - [Client-Server Communication](#client-server-communication)
+    - [Network Topology Examples](#network-topology-examples)
+      - [Simple Neighborhood](#simple-neighborhood)
+      - [Complex Neighborhood](#complex-neighborhood)
+    - [Commands](#commands)
+    - [Example Client Usage](#example-client-usage)
+  - [API Endpoints](#api-endpoints)
+    - [Upload a File](#upload-a-file)
+    - [Download a File](#download-a-file)
+  - [Protocol Overview](#protocol-overview)
+    - [Message Structure](#message-structure)
+    - [Encryption Details](#encryption-details)
+  - [Logging](#logging)
+  - [Contributing](#contributing)
+
+## Installation
 
 ### Prerequisites
-- Python 3.x installed on your system.
-- Install the required dependencies listed in `requirements.txt`.
 
-### Installation
+Ensure you have the following installed:
 
-#### Clone the Repository:
+- **Python 3.8+**
+- **pip** (Python package installer)
+
+### Install Dependencies
+
+1. Clone the repository:
+    ```bash
+    git clone https://github.com/your-repository/olaf-chat-server.git
+    cd olaf-chat-server
+    ```
+
+2. Install the required Python packages:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+## Usage
+
+### Starting the Server
+
+Run the server using the following command:
+
 ```bash
-git clone https://github.com/<YourUserName>/UofA_2024_SP_OlafChat.git
-cd UofA_2024_SP_OlafChat
+python server.py
 ```
 
-#### Install Dependencies:
+By default, the WebSocket server will start on `ws://0.0.0.0:8080`, and the HTTP server for file handling will run on `http://0.0.0.0:8000`.
+
+### Client-Server Communication
+
+Each client connects to one server at a time, which becomes their **home server**. The server forwards messages to other connected servers and clients. Clients can only communicate with users on their home server or users on servers directly connected to their home server.
+
+Messages between clients are encrypted using a combination of RSA and AES-GCM encryption to ensure end-to-end security.
+
+### Network Topology Examples
+
+#### Simple Neighborhood
+In this example, each client is directly connected to the same or directly connected servers. All clients can communicate with one another.
+
+```mermaid
+graph LR;
+subgraph connections
+A[ClientA] -.-> B((Server1));
+C[ClientB] -.-> B;
+B <--> D((Server2));
+E[ClientC] -.-> D;
+end
+```
+
+#### Complex Neighborhood
+Here, all clients can communicate, either by being on the same server or through interconnected servers in the neighborhood.
+
+```mermaid
+graph LR;
+subgraph connections
+A[ClientA] -.-> B((Server1));
+C[ClientB] -.-> B;
+B <--> D((Server2));
+E[ClientC] -.-> D;
+D <--> F((Server3));
+G[ClientD] -.-> F;
+H[ClientE] -.-> F;
+D <--> I((Server4));
+J[ClientF] -.-> I;
+K[ClientG] -.-> I;
+B <--> F;
+B <--> I;
+F <--> I;
+end
+```
+
+### Commands
+
+Once connected, clients can use the following commands:
+
+- **/list**: Show online users across all servers.
+- **/broadcast `<message>`**: Send a broadcast message to all users in the neighborhood.
+- **/msg `<username>` `<message>`**: Send a private message to a specific user.
+- **/get_public_key `<username>`**: Retrieve the public key of a specific user.
+- **/upload `<filepath>`**: Upload a file to the server.
+- **/download `<file_url>`**: Download a file from the server.
+
+### Example Client Usage
+
+The client establishes a WebSocket connection and communicates using the server’s public key for encryption.
+
+Example flow:
+1. The client sends a `hello` message with their public key.
+2. The server responds with an acknowledgment and the list of connected clients.
+3. Clients can then send encrypted messages to each other through their home server.
+
+## API Endpoints
+
+The server exposes HTTP endpoints for file uploads and downloads.
+
+### Upload a File
+
 ```bash
-pip install -r requirements.txt
+POST /api/upload
 ```
 
-### Running the Server
+- **Request**: Send a multipart form-data request with a file field containing the file.
+- **Response**: Returns the URL to access the uploaded file.
 
-#### Start the Server:
+Example:
+
 ```bash
-python server/server.py
+curl -F "file=@/path/to/yourfile.txt" http://localhost:8000/api/upload
 ```
-The server is responsible for accepting client connections, handling authentication, relaying encrypted messages, and managing file transfers.
 
-### Server Output
-The server will display output indicating:
-- Client connections and disconnections.
-- RSA public key exchanges.
-- Encrypted and decrypted messages.
-- File uploads and downloads.
-- Notifications sent to users.
+### Download a File
 
-### Running the Client
-
-#### Start the Client:
 ```bash
-python client/client.py
-```
-The client connects to the server, exchanges public keys, and allows the user to send encrypted messages and files.
-
-### Client Commands
-Once connected, the client supports the following commands:
-
-- **List Online Users**:
-```plaintext
-/list
+GET /files/<filename>
 ```
 
-- **Send a Broadcast Message**:
-```plaintext
-/all <message>
-```
+- **Request**: Use the filename returned from the upload response.
+- **Response**: The file will be returned as a binary stream.
 
-- **Send a Private Message**:
-```plaintext
-/msg <username> <message>
-```
+Example:
 
-- **Upload a File**:
-
-  - **Public Upload**:
-  ```plaintext
-  /upload <filename>
-  ```
-
-  - **Private Upload**:
-  ```plaintext
-  /upload <filename> <username>
-  ```
-
-- **Download a File**:
-```plaintext
-/download <filename>
-```
-
-- **List Downloadable Files**:
-```plaintext
-/files
-```
-
-- **Show Help**:
-```plaintext
-/help
-```
-
-- **Exit the Chat**:
-```plaintext
-quit
-```
-
-### Sending Messages
-
-- **Broadcast Message**: Use `/all` followed by your message to send a message to all online users.
-- **Private Message**: Use `/msg` followed by the username and your message to send a private message.
-
-### File Transfer
-
-#### Uploading Files:
-- **Public File**: Upload a file that all users can download:
-```plaintext
-/upload example.txt
-```
-
-- **Private File**: Upload a file for a specific user:
-```plaintext
-/upload example.txt recipient_username
-```
-
-#### Downloading Files:
-- **Request a list of available files**:
-```plaintext
-/files
-```
-
-- **Download a file from the list**:
-```plaintext
-/download example.txt
-```
-
-- **File Storage**:
-Downloaded files are saved in a directory named after your username, e.g., `username_files/`.
-
-### Receiving Notifications
-
-#### File Upload Notifications:
-- When a user uploads a public file, all users receive a notification:
-```plaintext
-[Notification]: username has uploaded a new public file 'example.txt'.
-```
-
-- When a private file is uploaded for you, you receive a notification:
-```plaintext
-[Notification]: username has uploaded a file 'example.txt' for you.
-```
-
-### Exit the Client
-To exit the client, type:
-```plaintext
-quit
-```
-
-## Encryption and Security
-
-- **AES Encryption**: Uses AES in CFB mode for message encryption, ensuring confidentiality.
-- **RSA Key Exchange**: RSA is used for exchanging AES session keys securely between clients and servers.
-- **Digital Signatures**: Messages are signed using RSA to ensure integrity and authenticity.
-- **Replay Attack Prevention**: A counter mechanism is used to prevent replay attacks.
-- **Shared Keys for Private Messaging**: Clients establish shared AES keys for encrypted private messaging.
-
-## Example Workflow
-
-- **Start the Server**:
 ```bash
-python server/server.py
+curl -O http://localhost:8000/files/yourfile.txt
 ```
 
-- **Start the Client**:
-```bash
-python client/client.py
+## Protocol Overview
+
+The protocol follows the **OLAF/Neighborhood Protocol**, where clients connect to a single server and servers form neighborhoods to facilitate communication.
+
+### Message Structure
+
+All messages follow the below structure:
+
+```JSON
+{
+    "type": "signed_data",
+    "data": {  },
+    "counter": 12345,
+    "signature": "<Base64 signature of data + counter>"
+}
 ```
 
-- **Register or Login**:
-  - Enter your username.
-  - Choose to register or login.
+- **counter**: A monotonically increasing integer that prevents replay attacks.
+- **signature**: Generated using RSA-PSS with SHA-256 and ensures the integrity of the message.
 
-- **List Online Users**:
-```plaintext
-/list
+### Encryption Details
+
+- **RSA**: Used for key exchange and message signing. Key length: 2048 bits.
+- **AES-GCM**: Used for encrypting message payloads. AES-256 is the default key size.
+- **Message Signing**: All messages are signed using RSA-PSS with SHA-256 to ensure authenticity and prevent tampering.
+
+Messages include a counter that prevents replay attacks by ensuring that each message has a unique incrementing value.
+
+## Logging
+
+By default, the server outputs `INFO` level logs to the console, including connections, disconnections, and message flow. For more detailed logs, you can enable `DEBUG` level logging:
+
+```python
+import logging
+logging.getLogger('websockets').setLevel(logging.DEBUG)
 ```
 
-- **Send a Broadcast Message**:
-```plaintext
-/all Hello everyone!
-```
+To reduce `websockets` library output, set it to `INFO` or higher.
 
-- **Send a Private Message**:
-```plaintext
-/msg alice Hi Alice!
-```
+## Contributing
 
-- **Upload a Public File**:
-```plaintext
-/upload document.pdf
-```
-
-- **Upload a Private File**:
-```plaintext
-/upload secrets.txt bob
-```
-
-- **Download a File**:
-  - **List available files**:
-  ```plaintext
-  /files
-  ```
-
-  - **Download a file**:
-  ```plaintext
-  /download document.pdf
-  ```
-
-## Project Structure
-
-```plaintext
-├── client/
-│   ├── client.py          # Client-side implementation
-│   ├── shared/
-│       ├── encryption.py  # Encryption functions shared by client and server
-├── server/
-│   ├── server.py          # Server-side implementation
-│   ├── auth.py            # User authentication management
-│   ├── shared/
-│       ├── encryption.py  # Encryption functions shared by client and server
-├── server_files/          # Directory where server stores uploaded files
-├── username_files/        # Directories where clients store downloaded files (one per user)
-├── requirements.txt       # List of Python dependencies
-```
-
-## Troubleshooting
-
-- **Connection Refused**:
-  - Ensure that the server is running.
-  - Verify the IP address and port number in `client.py`.
-
-- **Signature Verification Failed**:
-  - Ensure that the message has not been tampered with.
-  - Verify that the correct public keys are being used.
-
-- **File Not Found**:
-  - Check if the file exists in the specified directory.
-  - Ensure you have permission to access the file.
-
-- **Permission Denied for File Download**:
-  - You may not have permission to download the requested file.
-  - Use `/files` to see the list of files you can download.
-
-## Security Considerations
-
-- **Key Management**: Each user has a unique RSA key pair for authentication and encryption.
-- **Secure Communication**: All messages and file transfers are encrypted to prevent eavesdropping.
-- **Access Control**: File permissions are enforced to prevent unauthorized access.
-- **Integrity Checks**: Digital signatures are used to verify the integrity of messages.
-
-## Contribution
-
-If you would like to contribute to this project, feel free to fork the repository and submit a pull request. Contributions for adding new features, improving security, or fixing bugs are welcome.
-
-## License
-
-This project is licensed under the MIT License. See the LICENSE file for more details.
-
-## Future Enhancements
-
-- **Shared Key Confirmation**: Implement confirmation for shared keys to improve reliability.
-- **Message History**: Store and retrieve chat history.
-- **User Presence Notifications**: Notify users when others log in or out.
-- **Graphical User Interface**: Develop a GUI for improved user experience.
-- **Enhanced Error Handling**: Improve feedback for various error scenarios.
-- **Group Chat Support**: Enable users to create and join group chats.
-- **File Transfer Progress**: Show progress indicators during file uploads/downloads.
-
-*Note: Replace `<YourUserName>` in the repository URL with your actual GitHub username.*
+1. Fork the repository.
+2. Create a new branch for your feature.
+3. Submit a pull request with a detailed description of your changes.
