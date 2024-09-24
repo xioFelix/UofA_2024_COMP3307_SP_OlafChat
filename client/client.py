@@ -326,7 +326,7 @@ class Client:
             "type": "private_message",
             "to": recipient,
             "message": encrypted_message_b64,
-            "counter": counter  # 附加计数器值
+            "counter": counter
         }
         content = json.dumps(content_data)
         self.send_message(content)
