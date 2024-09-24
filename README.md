@@ -23,6 +23,7 @@ Clients can only connect to their home server and communicate with users on the 
     - [Install Dependencies](#install-dependencies)
   - [Usage](#usage)
     - [Starting the Server](#starting-the-server)
+    - [Starting the Client](#starting-the-client)
     - [Client-Server Communication](#client-server-communication)
     - [Network Topology Examples](#network-topology-examples)
       - [Simple Neighborhood](#simple-neighborhood)
@@ -51,8 +52,8 @@ Ensure you have the following installed:
 
 1. Clone the repository:
     ```bash
-    git clone https://github.com/your-repository/olaf-chat-server.git
-    cd olaf-chat-server
+    git clone https://github.com/xioFelix/UofA_2024_SP_OlafChat.git
+    cd UofA_2024_SP_OlafChat
     ```
 
 2. Install the required Python packages:
@@ -67,10 +68,17 @@ Ensure you have the following installed:
 Run the server using the following command:
 
 ```bash
-python server.py
+./scripts/run_server.sh
 ```
 
 By default, the WebSocket server will start on `ws://0.0.0.0:8080`, and the HTTP server for file handling will run on `http://0.0.0.0:8000`.
+
+### Starting the Client
+
+```bash
+cd client
+python client.py ws://localhost:8080 http://localhost:8000
+```
 
 ### Client-Server Communication
 
