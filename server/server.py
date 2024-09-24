@@ -1,490 +1,451 @@
-import socket
-import threading
-import logging
+# server.py
+
+import asyncio
 import json
+import logging
 import os
 import base64
-from shared.encryption import (
-    load_or_generate_private_key,
-    load_public_key,
-    serialize_public_key,
-    encrypt_message,
-    decrypt_message,
-    verify_signature,
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from websockets import serve
+from aiohttp import web
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,  # Set to DEBUG for detailed logs
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-from auth import UserManager
 
-logging.basicConfig(level=logging.INFO)
+# Global state
+online_users = {}          # username -> websocket
+user_public_keys = {}     # username -> public_key (RSA public key object)
+last_counters = {}        # username -> last received counter
 
-# Global user manager
-user_manager = UserManager("user_data.json")
+# File storage directory
+FILE_STORAGE_DIR = 'server_files'
+os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
 
-# Global online users set and client connections dictionary
-online_users = set()
-client_connections = {}
-client_handlers = {}  # Store ClientHandler instances
-
-# Global file permissions dictionary
-file_permissions = {}  # Stores {filename: {'owner': username, 'recipient': recipient}}
-
-
-class ClientHandler(threading.Thread):
-    """
-    Handles communication with a connected client.
-    """
-
-    def __init__(self, client_socket, address, server_private_key):
-        threading.Thread.__init__(self)
-        self.client_socket = client_socket
-        self.address = address
-        self.server_private_key = server_private_key
-        self.client_public_key = None
-        self.username = None
-        self.logged_in = False
-        self.lock = threading.Lock()
-
-    def recvall(self, n):
-        """
-        Helper function to receive n bytes or return None if EOF is hit.
-        """
-        data = bytearray()
-        while len(data) < n:
-            packet = self.client_socket.recv(n - len(data))
-            if not packet:
-                return None
-            data.extend(packet)
-        return data
-
-    def run(self):
-        try:
-            logging.info(f"Handling client {self.address}")
-
-            # Send server's public key
-            server_public_key_pem = serialize_public_key(
-                self.server_private_key.public_key()
+# Load or generate server's RSA key pair
+def load_or_generate_server_keys():
+    if os.path.exists("server_private_key.pem"):
+        with open("server_private_key.pem", "rb") as key_file:
+            private_key = serialization.load_pem_private_key(
+                key_file.read(),
+                password=None
             )
-            self.client_socket.sendall(server_public_key_pem)
-
-            # Receive client's public key and username
-            data = self.client_socket.recv(8192)
-            message = data.decode("utf-8")
-            message = json.loads(message)
-
-            if message["type"] == "register":
-                self.username = message["username"]
-                client_public_key_pem = message["public_key"].encode("utf-8")
-                self.client_public_key = load_public_key(client_public_key_pem)
-
-                # Register user
-                if user_manager.register_user(
-                    self.username, client_public_key_pem.decode("utf-8")
-                ):
-                    self.logged_in = True
-                    response = {
-                        "status": "success",
-                        "message": "Registered successfully.",
-                    }
-                else:
-                    response = {
-                        "status": "error",
-                        "message": "Username already exists.",
-                    }
-                    self.send_response(response)
-                    self.client_socket.close()
-                    return
-
-                self.send_response(response)
-
-            elif message["type"] == "login":
-                self.username = message["username"]
-                client_public_key_pem = message["public_key"].encode("utf-8")
-                self.client_public_key = load_public_key(client_public_key_pem)
-
-                # Validate user
-                stored_public_key_pem = user_manager.get_user_public_key(self.username)
-                if (
-                    stored_public_key_pem
-                    and stored_public_key_pem == client_public_key_pem.decode("utf-8")
-                ):
-                    self.logged_in = True
-                    response = {
-                        "status": "success",
-                        "message": "Logged in successfully.",
-                    }
-                else:
-                    response = {
-                        "status": "error",
-                        "message": "Invalid username or key.",
-                    }
-                    self.send_response(response)
-                    self.client_socket.close()
-                    return
-
-                self.send_response(response)
-
-            else:
-                response = {"status": "error", "message": "Invalid message type."}
-                self.send_response(response)
-                self.client_socket.close()
-                return
-
-            if self.logged_in:
-                # User successfully logged in, add to online users and connections
-                online_users.add(self.username)
-                client_connections[self.username] = self.client_socket
-                client_handlers[self.username] = self
-                logging.info(
-                    f"User {self.username} logged in. Online users: {online_users}"
+        logging.info("Loaded existing private key from server_private_key.pem.")
+    else:
+        private_key = rsa.generate_private_key(
+            public_exponent=65537,
+            key_size=2048
+        )
+        with open("server_private_key.pem", "wb") as key_file:
+            key_file.write(
+                private_key.private_bytes(
+                    encoding=serialization.Encoding.PEM,
+                    format=serialization.PrivateFormat.PKCS8,
+                    encryption_algorithm=serialization.NoEncryption()
                 )
+            )
+        logging.info("Generated new private key and saved to server_private_key.pem.")
+    return private_key
 
-            # Main loop to handle client messages
-            while self.logged_in:
-                # Read the message length first
-                raw_msglen = self.recvall(4)
-                if not raw_msglen:
-                    break
-                message_length = int.from_bytes(raw_msglen, byteorder="big")
-                # Now read the message data
-                encrypted_message = self.recvall(message_length)
-                if not encrypted_message:
-                    break
+server_private_key = load_or_generate_server_keys()
+server_public_key_pem = server_private_key.public_key().public_bytes(
+    encoding=serialization.Encoding.PEM,
+    format=serialization.PublicFormat.SubjectPublicKeyInfo
+).decode('utf-8')
 
-                message_json = decrypt_message(
-                    encrypted_message.decode("utf-8"), self.server_private_key
-                )
-                message = json.loads(message_json)
+# Utility functions
+def sign_message(private_key, message):
+    signature = private_key.sign(
+        message.encode('utf-8'),
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=32
+        ),
+        hashes.SHA256()
+    )
+    return base64.b64encode(signature).decode('utf-8')
 
-                # Verify signature
-                signature = message.get("signature")
-                content = message.get("content")
-                if not verify_signature(self.client_public_key, content, signature):
-                    logging.warning("Signature verification failed.")
-                    continue
+def verify_signature(public_key, message, signature_b64):
+    signature = base64.b64decode(signature_b64)
+    try:
+        public_key.verify(
+            signature,
+            message.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=32
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except Exception as e:
+        logging.warning(f"Signature verification failed: {e}")
+        return False
 
-                # Parse message content
-                content_data = json.loads(content)
+def encrypt_message(message_json, recipient_public_key):
+    try:
+        # Generate AES key and IV
+        aes_key = os.urandom(32)  # 256 bits
+        iv = os.urandom(16)       # 128 bits
 
-                # Handle message based on type
-                msg_type = content_data.get("type")
-                if msg_type == "list_users":
-                    self.handle_list_users()
-                elif msg_type == "broadcast":
-                    self.handle_broadcast(content_data.get("body"))
-                elif msg_type == "private_message":
-                    self.handle_private_message(content_data)
-                elif msg_type == "get_public_key":
-                    self.handle_get_public_key(content_data)
-                elif msg_type == "shared_key":
-                    self.handle_shared_key(content_data)
-                elif msg_type == "upload":
-                    self.handle_file_upload(content_data)
-                elif msg_type == "download":
-                    self.handle_file_download(content_data)
-                elif msg_type == "file_list":
-                    self.handle_file_list()
-                else:
-                    self.handle_message(content_data)
+        # AES-GCM encryption
+        encryptor = Cipher(
+            algorithms.AES(aes_key),
+            modes.GCM(iv),
+        ).encryptor()
+        ciphertext = encryptor.update(message_json.encode('utf-8')) + encryptor.finalize()
+        tag = encryptor.tag  # Extract the authentication tag
 
-        except Exception as e:
-            logging.error(f"Error handling client {self.address}: {e}")
-        finally:
-            # Remove user from online users upon disconnection
-            if self.username in online_users:
-                online_users.remove(self.username)
-                client_connections.pop(self.username, None)
-                client_handlers.pop(self.username, None)
-                logging.info(
-                    f"User {self.username} disconnected. Online users: {online_users}"
-                )
-            self.client_socket.close()
-            logging.info(f"Connection with {self.address} closed.")
+        # Append the tag to the ciphertext
+        encrypted_message = ciphertext + tag
 
-    def send_response(self, response):
-        """
-        Send a response to the client.
-        """
-        response_json = json.dumps(response)
-        encrypted_response = encrypt_message(response_json, self.client_public_key)
-        encrypted_response_bytes = encrypted_response.encode("utf-8")
-        response_length = len(encrypted_response_bytes)
-        with self.lock:
-            self.client_socket.sendall(response_length.to_bytes(4, byteorder="big"))
-            self.client_socket.sendall(encrypted_response_bytes)
-
-    def handle_list_users(self):
-        """
-        Handle a request for the list of online users.
-        """
-        user_list = list(online_users)
-        response = {"type": "user_list", "users": user_list}
-        self.send_response(response)
-
-    def handle_broadcast(self, message_body):
-        """
-        Handle broadcasting a message to all online users.
-        """
-        # Construct the broadcast message
-        broadcast_message = {
-            "type": "broadcast",
-            "from": self.username,
-            "message": message_body,
-        }
-        message_json = json.dumps(broadcast_message)
-
-        # Send the message to all connected clients except the sender
-        for username, handler in client_handlers.items():
-            if username != self.username:
-                try:
-                    handler.send_raw_message(message_json)
-                except Exception as e:
-                    logging.error(f"Error sending broadcast to {username}: {e}")
-
-    def handle_private_message(self, content_data):
-        """
-        Handle forwarding a private message to a specific user.
-        """
-        recipient = content_data.get("to")
-        encrypted_message = content_data.get("message")
-        counter = content_data.get("counter") # Counter for replay attack prevention
-
-        if recipient in client_handlers:
-            try:
-                # Forward the message to the recipient
-                private_message = {
-                    "type": "private_message",
-                    "from": self.username,
-                    "message": encrypted_message,
-                    "counter": counter 
-                }
-                message_json = json.dumps(private_message)
-                recipient_handler = client_handlers[recipient]
-                recipient_handler.send_raw_message(message_json)
-                logging.info(
-                    f"Forwarded private message from {self.username} to {recipient}"
-                )
-            except Exception as e:
-                logging.error(f"Error forwarding private message to {recipient}: {e}")
-        else:
-            # Recipient is not online
-            response = {
-                "status": "error",
-                "message": f"User {recipient} is not online.",
-            }
-            self.send_response(response)
-
-    def handle_get_public_key(self, content_data):
-        """
-        Handle a request to get another user's public key.
-        """
-        target_user = content_data.get("username")
-        public_key_pem = user_manager.get_user_public_key(target_user)
-        if public_key_pem:
-            response = {
-                "type": "public_key",
-                "username": target_user,
-                "public_key": public_key_pem,
-            }
-        else:
-            response = {"status": "error", "message": f"User {target_user} not found."}
-        self.send_response(response)
-
-    def handle_shared_key(self, content_data):
-        """
-        Handle forwarding an encrypted shared key to another user.
-        """
-        recipient = content_data.get("to")
-        encrypted_shared_key = content_data.get("encrypted_shared_key")
-
-        if recipient in client_handlers:
-            try:
-                # Forward the encrypted shared key to the recipient
-                shared_key_message = {
-                    "type": "shared_key",
-                    "from": self.username,
-                    "encrypted_shared_key": encrypted_shared_key,
-                }
-                message_json = json.dumps(shared_key_message)
-                recipient_handler = client_handlers[recipient]
-                recipient_handler.send_raw_message(message_json)
-                logging.info(
-                    f"Forwarded shared key from {self.username} to {recipient}"
-                )
-            except Exception as e:
-                logging.error(f"Error forwarding shared key to {recipient}: {e}")
-        else:
-            # Recipient is not online
-            response = {
-                "status": "error",
-                "message": f"User {recipient} is not online.",
-            }
-            self.send_response(response)
-
-    def handle_file_upload(self, content_data):
-        """
-        Handle file upload from a client.
-        """
-        filename = content_data.get("filename")
-        file_data_b64 = content_data.get("file_data")
-        recipient = content_data.get("recipient")  # None means public
-        file_data = base64.b64decode(file_data_b64)
-
-        # Save the file to server_files directory
-        save_path = os.path.join("server_files", filename)
-        os.makedirs("server_files", exist_ok=True)
-        with open(save_path, "wb") as f:
-            f.write(file_data)
-        logging.info(
-            f"File {filename} uploaded by {self.username} and saved to {save_path}"
+        # Encrypt AES key with RSA-OAEP
+        encrypted_key = recipient_public_key.encrypt(
+            aes_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
         )
 
-        # Store file permissions
-        file_permissions[filename] = {
-            "owner": self.username,
-            "recipient": recipient,  # None means public
+        # Prepare payload
+        encrypted_payload = {
+            "encrypted_key": base64.b64encode(encrypted_key).decode('utf-8'),
+            "iv": base64.b64encode(iv).decode('utf-8'),
+            "encrypted_message": base64.b64encode(encrypted_message).decode('utf-8')
         }
 
-        response = {
-            "status": "success",
-            "message": f"File {filename} uploaded successfully.",
-        }
-        self.send_response(response)
+        # Debugging
+        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logging.debug(f"Tag length: {len(tag)} bytes")
+        logging.debug(f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes")
 
-        # Notify recipient if file is private
-        if recipient:
-            if recipient in client_handlers:
+        return json.dumps(encrypted_payload)
+    except Exception as e:
+        logging.error(f"Encryption failed: {e}")
+        raise
+
+def decrypt_message(encrypted_payload_json, recipient_private_key):
+    try:
+        payload = json.loads(encrypted_payload_json)
+        encrypted_key = base64.b64decode(payload['encrypted_key'])
+        iv = base64.b64decode(payload['iv'])
+        encrypted_message = base64.b64decode(payload['encrypted_message'])
+
+        # Decrypt AES key with RSA-OAEP
+        aes_key = recipient_private_key.decrypt(
+            encrypted_key,
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None
+            )
+        )
+
+        # Separate ciphertext and tag
+        ciphertext = encrypted_message[:-16]  # Last 16 bytes are the tag
+        tag = encrypted_message[-16:]
+
+        # Debugging
+        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logging.debug(f"Tag length: {len(tag)} bytes")
+
+        # AES-GCM decryption with tag
+        decryptor = Cipher(
+            algorithms.AES(aes_key),
+            modes.GCM(iv, tag),
+        ).decryptor()
+        decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
+
+        return decrypted_message.decode('utf-8')
+    except Exception as e:
+        logging.error(f"Decryption failed: {e}")
+        raise
+
+async def handler(websocket, path):
+    try:
+        # Send server's public key
+        await websocket.send(server_public_key_pem)
+        logging.debug(f"Sent server public key to {websocket.remote_address}.")
+
+        async for message in websocket:
+            try:
+                # Decrypt incoming message
+                decrypted_json = decrypt_message(message, server_private_key)
+                signed_data = json.loads(decrypted_json)
+
+                # Extract fields
+                msg_type = signed_data.get("type")
+                data = signed_data.get("data")
+                counter = signed_data.get("counter")
+                signature = signed_data.get("signature")
+
+                if msg_type != "signed_data" or not data or counter is None or not signature:
+                    logging.warning(f"Malformed message from {websocket.remote_address}: {signed_data}")
+                    continue
+
+                # Determine if the user is already identified
+                sender_username = get_username_by_websocket(websocket)
+
+                if sender_username:
+                    # User is identified; retrieve public key
+                    sender_public_key = user_public_keys.get(sender_username)
+                    if not sender_public_key:
+                        logging.warning(f"No public key found for user {sender_username}.")
+                        continue
+
+                    # Verify signature
+                    expected_message = json.dumps(data) + str(counter)
+                    if not verify_signature(sender_public_key, expected_message, signature):
+                        logging.warning(f"Invalid signature from {sender_username}.")
+                        continue
+
+                    # Prevent replay attacks
+                    last_counter = last_counters.get(sender_username, 0)
+                    if counter <= last_counter:
+                        logging.warning(f"Replay attack detected from {sender_username}. Counter: {counter}")
+                        continue
+                    last_counters[sender_username] = counter
+
+                    # Process message
+                    await process_signed_data(websocket, data, sender_username)
+
+                else:
+                    # User is not identified; expect 'hello' or 'login' messages
+                    if data.get("type") in ["hello", "login"]:
+                        await process_signed_data_initial(websocket, data, counter, signature)
+                    else:
+                        logging.warning(f"Unauthenticated message from {websocket.remote_address}: {data.get('type')}")
+                        continue
+
+            except Exception as e:
+                logging.error(f"Error processing message from {websocket.remote_address}: {e}")
+                await websocket.close(code=1011, reason="Internal server error")
+                break
+
+    except Exception as e:
+        logging.error(f"Connection error with {websocket.remote_address}: {e}")
+    finally:
+        # Handle disconnection
+        username = get_username_by_websocket(websocket)
+        if username:
+            del online_users[username]
+            del user_public_keys[username]
+            del last_counters[username]
+            logging.info(f"User {username} disconnected. Online users: {set(online_users.keys())}")
+
+def get_username_by_websocket(websocket):
+    for user, ws in online_users.items():
+        if ws == websocket:
+            return user
+    return None
+
+async def process_signed_data_initial(websocket, data, counter, signature):
+    msg_type = data.get("type")
+    username = data.get("username")
+    public_key_pem = data.get("public_key")
+
+    if not username or not public_key_pem:
+        logging.warning("Hello/Login message missing username or public_key.")
+        response = {"type": "status", "status": "error", "message": "Missing username or public_key."}
+        await send_response(websocket, response)
+        return
+
+    if username in online_users:
+        logging.warning(f"Username {username} already online.")
+        response = {"type": "status", "status": "error", "message": "Username already online."}
+        await send_response(websocket, response)
+        return
+
+    # Load public key
+    try:
+        public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+        logging.debug(f"Loaded public key for user {username}.")
+    except Exception as e:
+        logging.warning(f"Invalid public key format from {username}: {e}")
+        response = {"type": "status", "status": "error", "message": "Invalid public key format."}
+        await send_response(websocket, response)
+        return
+
+    if msg_type == "hello":
+        # Register new user
+        online_users[username] = websocket
+        user_public_keys[username] = public_key
+        logging.info(f"User {username} connected. Online users: {set(online_users.keys())}")
+
+        # Send acknowledgment
+        response = {"type": "status", "status": "success", "message": "Hello received."}
+        await send_response(websocket, response)
+
+    elif msg_type == "login":
+        # Authenticate user (simplified for example)
+        online_users[username] = websocket
+        user_public_keys[username] = public_key
+        logging.info(f"User {username} logged in successfully. Online users: {set(online_users.keys())}")
+
+        # Send success response
+        response = {"type": "status", "status": "success", "message": "Logged in successfully."}
+        await send_response(websocket, response)
+
+async def process_signed_data(websocket, data, username):
+    msg_type = data.get("type")
+
+    if msg_type == "list_users":
+        await handle_list_users(websocket, username)
+    elif msg_type == "broadcast":
+        await handle_broadcast(websocket, username, data.get("body"))
+    elif msg_type == "private_message":
+        await handle_private_message(websocket, username, data)
+    else:
+        logging.warning(f"Unhandled message type from {username}: {msg_type}")
+
+async def handle_list_users(websocket, username):
+    users = list(online_users.keys())
+    response = {"type": "client_list", "servers": users}
+    await send_response(websocket, response)
+    logging.debug(f"Sent client list to {username}.")
+
+async def handle_broadcast(websocket, username, message_body):
+    if not message_body:
+        logging.warning(f"Broadcast message missing body from {username}.")
+        return
+
+    broadcast_message = {
+        "type": "broadcast",
+        "from": username,
+        "message": message_body
+    }
+
+    # Encrypt broadcast message for each user and send
+    for user, ws in online_users.items():
+        if user != username:
+            recipient_public_key = user_public_keys.get(user)
+            if recipient_public_key:
                 try:
-                    notification = {
-                        "type": "notification",
-                        "message": f"{self.username} has uploaded a file '{filename}' for you.",
-                    }
-                    message_json = json.dumps(notification)
-                    recipient_handler = client_handlers[recipient]
-                    recipient_handler.send_raw_message(message_json)
-                    logging.info(
-                        f"Sent file upload notification to {recipient} for file '{filename}'"
-                    )
+                    encrypted_payload = encrypt_message(json.dumps(broadcast_message), recipient_public_key)
+                    await ws.send(encrypted_payload)
+                    logging.debug(f"Broadcast message sent to {user}.")
                 except Exception as e:
-                    logging.error(f"Error sending notification to {recipient}: {e}")
-        else:
-            # Notify all users about the new public file
-            notification = {
-                "type": "notification",
-                "message": f"{self.username} has uploaded a new public file '{filename}'.",
-            }
-            message_json = json.dumps(notification)
-            for username, handler in client_handlers.items():
-                if username != self.username:
-                    try:
-                        handler.send_raw_message(message_json)
-                        logging.info(
-                            f"Sent public file upload notification to {username} for file '{filename}'"
-                        )
-                    except Exception as e:
-                        logging.error(f"Error sending notification to {username}: {e}")
+                    logging.error(f"Failed to send broadcast message to {user}: {e}")
 
-    def handle_file_download(self, content_data):
-        """
-        Handle file download request from a client.
-        """
-        filename = content_data.get("filename")
-        file_path = os.path.join("server_files", filename)
-        if os.path.exists(file_path):
-            # Check file permissions
-            permissions = file_permissions.get(filename)
-            if permissions:
-                recipient = permissions.get("recipient")
-                if (
-                    recipient
-                    and recipient != self.username
-                    and permissions.get("owner") != self.username
-                ):
-                    response = {
-                        "status": "error",
-                        "message": f"You do not have permission to download {filename}.",
-                    }
-                    self.send_response(response)
-                    return
-            else:
-                response = {
-                    "status": "error",
-                    "message": f"File permissions not found for {filename}.",
-                }
-                self.send_response(response)
-                return
+async def handle_private_message(websocket, username, data):
+    recipient = data.get("to")
+    encrypted_payload = data.get("message")
+    counter = data.get("counter")
 
-            with open(file_path, "rb") as f:
-                file_data = f.read()
-            file_data_b64 = base64.b64encode(file_data).decode("utf-8")
-            response = {
-                "type": "file_data",
-                "filename": filename,
-                "file_data": file_data_b64,
-            }
-            self.send_response(response)
-            logging.info(f"Sent file {filename} to {self.username}")
-        else:
-            response = {
-                "status": "error",
-                "message": f"File {filename} not found on server.",
-            }
-            self.send_response(response)
+    if not recipient or not encrypted_payload or counter is None:
+        logging.warning(f"Private message from {username} missing fields.")
+        response = {"type": "status", "status": "error", "message": "Missing fields in private message."}
+        await send_response(websocket, response)
+        return
 
-    def handle_file_list(self):
-        """
-        Handle a request to get the list of downloadable files for the user.
-        """
-        user_files = []
-        for filename, permissions in file_permissions.items():
-            # File is public, or user is the recipient or owner
-            if (
-                permissions["recipient"] is None
-                or permissions["recipient"] == self.username
-                or permissions["owner"] == self.username
-            ):
-                user_files.append(filename)
-        response = {"type": "file_list", "files": user_files}
-        self.send_response(response)
+    if recipient not in online_users:
+        logging.warning(f"Private message recipient {recipient} not online.")
+        response = {"type": "status", "status": "error", "message": f"User {recipient} not online."}
+        await send_response(websocket, response)
+        return
 
-    def handle_message(self, content_data):
-        """
-        Handle other types of messages.
-        """
-        logging.info(f"Received message from {self.username}: {content_data}")
-        response = {"status": "success", "message": "Message received."}
-        self.send_response(response)
+    recipient_ws = online_users[recipient]
+    recipient_public_key = user_public_keys.get(recipient)
+    if not recipient_public_key:
+        logging.warning(f"No public key found for user {recipient}.")
+        response = {"type": "status", "status": "error", "message": f"No public key found for user {recipient}."}
+        await send_response(websocket, response)
+        return
 
-    def send_raw_message(self, message_json):
-        """
-        Send a raw message to the client without additional wrapping.
-        """
-        encrypted_message = encrypt_message(message_json, self.client_public_key)
-        encrypted_message_bytes = encrypted_message.encode("utf-8")
-        message_length = len(encrypted_message_bytes)
-        with self.lock:
-            self.client_socket.sendall(message_length.to_bytes(4, byteorder="big"))
-            self.client_socket.sendall(encrypted_message_bytes)
-
-
-def start_server(host="0.0.0.0", port=8080):
-    """
-    Start the chat server.
-    """
-    server_private_key = load_or_generate_private_key("server_private_key.pem")
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.bind((host, port))
-    server_socket.listen(5)
-    logging.info(f"Server started and listening on {host}:{port}")
+    private_message = {
+        "type": "private_message",
+        "from": username,
+        "message": encrypted_payload,
+        "counter": counter
+    }
 
     try:
-        while True:
-            client_socket, address = server_socket.accept()
-            handler = ClientHandler(client_socket, address, server_private_key)
-            handler.start()
-    except KeyboardInterrupt:
-        logging.info("Server shutting down.")
-    finally:
-        server_socket.close()
+        encrypted_payload_for_recipient = encrypt_message(json.dumps(private_message), recipient_public_key)
+        await recipient_ws.send(encrypted_payload_for_recipient)
+        logging.debug(f"Private message from {username} sent to {recipient}.")
+    except Exception as e:
+        logging.error(f"Failed to send private message from {username} to {recipient}: {e}")
+        response = {"type": "status", "status": "error", "message": f"Failed to send message to {recipient}."}
+        await send_response(websocket, response)
 
+async def send_response(websocket, response):
+    # Determine the recipient's public key
+    username = get_username_by_websocket(websocket)
+    if not username:
+        logging.warning("Attempted to send response to unidentified websocket.")
+        return
+
+    recipient_public_key = user_public_keys.get(username)
+    if not recipient_public_key:
+        logging.warning(f"No public key found for user {username}. Cannot send response.")
+        return
+
+    try:
+        # Encrypt the response
+        encrypted_response = encrypt_message(json.dumps(response), recipient_public_key)
+        await websocket.send(encrypted_response)
+        logging.debug(f"Sent response to {username}: {response}")
+    except Exception as e:
+        logging.error(f"Failed to send response to {username}: {e}")
+
+# HTTP Handlers for File Upload and Download
+async def handle_upload(request):
+    reader = await request.multipart()
+    field = await reader.next()
+    if field.name != 'file':
+        return web.Response(status=400, text="Expected 'file' field.")
+
+    filename = field.filename
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+
+    with open(file_path, 'wb') as f:
+        while True:
+            chunk = await field.read_chunk()  # 8192 bytes by default.
+            if not chunk:
+                break
+            f.write(chunk)
+
+    file_url = f"http://{request.host}/files/{filename}"
+    logging.info(f"File uploaded: {filename} -> {file_url}")
+    return web.json_response({"type": "status", "status": "success", "file_url": file_url})
+
+async def handle_download(request):
+    filename = request.match_info.get('filename')
+    file_path = os.path.join(FILE_STORAGE_DIR, filename)
+
+    if not os.path.exists(file_path):
+        return web.Response(status=404, text="File not found.")
+
+    return web.FileResponse(file_path)
+
+def start_http_server():
+    app = web.Application()
+    app.router.add_post('/api/upload', handle_upload)
+    app.router.add_get('/files/{filename}', handle_download)
+    return app
+
+async def main():
+    # Start WebSocket server
+    ws_server = serve(handler, "0.0.0.0", 8080)
+    asyncio.ensure_future(ws_server)
+    logging.info("WebSocket server started on ws://0.0.0.0:8080")
+
+    # Start HTTP server for file transfers
+    app = start_http_server()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 8000)
+    await site.start()
+    logging.info("HTTP server started on http://0.0.0.0:8000")
+
+    # Run forever
+    await asyncio.Future()  # Run forever
 
 if __name__ == "__main__":
-    start_server()
+    asyncio.run(main())
