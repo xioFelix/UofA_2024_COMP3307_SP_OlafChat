@@ -11,6 +11,7 @@ from shared.encryption import (
     encrypt_message,
     decrypt_message,
     verify_signature,
+    sign_message,
 )
 from auth import UserManager
 
@@ -33,6 +34,12 @@ class ClientHandler(threading.Thread):
     Handles communication with a connected client.
     """
 
+    # Class-level dictionary to store counters for each client
+    server_counters = {}
+    
+    # Class-level lock for thread-safe access to server_counters
+    counters_lock = threading.Lock()
+
     def __init__(self, client_socket, address, server_private_key):
         threading.Thread.__init__(self)
         self.client_socket = client_socket
@@ -42,6 +49,7 @@ class ClientHandler(threading.Thread):
         self.username = None
         self.logged_in = False
         self.lock = threading.Lock()
+        self.counter = 0  # Counter for messages sent to the client
 
     def recvall(self, n):
         """
@@ -65,11 +73,23 @@ class ClientHandler(threading.Thread):
             )
             self.client_socket.sendall(server_public_key_pem)
 
-            # Receive client's public key and username
-            data = self.client_socket.recv(8192)
-            message = data.decode("utf-8")
-            message = json.loads(message)
+            # Receive message length first
+            raw_msglen = self.recvall(4)
+            if not raw_msglen:
+                logging.warning("Client disconnected before sending data.")
+                return
+            message_length = int.from_bytes(raw_msglen, byteorder="big")
 
+            # Now read the message data
+            data = self.recvall(message_length)
+            if not data:
+                logging.warning("Client disconnected while sending data.")
+                return
+
+            # Decode the data as UTF-8
+            message_json = data.decode('utf-8')
+            message = json.loads(message_json)
+        # Handle the message
             if message["type"] == "register":
                 self.username = message["username"]
                 client_public_key_pem = message["public_key"].encode("utf-8")
@@ -80,20 +100,20 @@ class ClientHandler(threading.Thread):
                     self.username, client_public_key_pem.decode("utf-8")
                 ):
                     self.logged_in = True
-                    response = {
+                    response_data = {
                         "status": "success",
                         "message": "Registered successfully.",
                     }
                 else:
-                    response = {
+                    response_data = {
                         "status": "error",
                         "message": "Username already exists.",
                     }
-                    self.send_response(response)
+                    self.send_response(response_data)
                     self.client_socket.close()
                     return
 
-                self.send_response(response)
+                self.send_response(response_data)
 
             elif message["type"] == "login":
                 self.username = message["username"]
@@ -107,24 +127,24 @@ class ClientHandler(threading.Thread):
                     and stored_public_key_pem == client_public_key_pem.decode("utf-8")
                 ):
                     self.logged_in = True
-                    response = {
+                    response_data = {
                         "status": "success",
                         "message": "Logged in successfully.",
                     }
                 else:
-                    response = {
+                    response_data = {
                         "status": "error",
                         "message": "Invalid username or key.",
                     }
-                    self.send_response(response)
+                    self.send_response(response_data)
                     self.client_socket.close()
                     return
 
-                self.send_response(response)
+                self.send_response(response_data)
 
             else:
-                response = {"status": "error", "message": "Invalid message type."}
-                self.send_response(response)
+                response_data = {"status": "error", "message": "Invalid message type."}
+                self.send_response(response_data)
                 self.client_socket.close()
                 return
 
@@ -136,6 +156,10 @@ class ClientHandler(threading.Thread):
                 logging.info(
                     f"User {self.username} logged in. Online users: {online_users}"
                 )
+
+                # Initialize the last counter for this client
+                with ClientHandler.counters_lock:
+                    ClientHandler.server_counters[self.username] = 0
 
             # Main loop to handle client messages
             while self.logged_in:
@@ -152,38 +176,62 @@ class ClientHandler(threading.Thread):
                 message_json = decrypt_message(
                     encrypted_message.decode("utf-8"), self.server_private_key
                 )
-                message = json.loads(message_json)
+                # Debugging: Log the decrypted message
+                logging.debug(f"Decrypted message JSON: {message_json}")
+                try:
+                    message = json.loads(message_json)
+                    logging.debug(f"Parsed message: {message}")
+                except json.JSONDecodeError as e:
+                    logging.error(f"JSON decoding failed: {e}")
+                    continue  # Skip processing this message
 
-                # Verify signature
-                signature = message.get("signature")
-                content = message.get("content")
-                if not verify_signature(self.client_public_key, content, signature):
-                    logging.warning("Signature verification failed.")
-                    continue
+                # Verify the message structure
+                if message.get("type") == "signed_data":
+                    data = message.get("data")
+                    counter = message.get("counter")
+                    signature = message.get("signature")
 
-                # Parse message content
-                content_data = json.loads(content)
+                    # Concatenate data and counter for signature verification
+                    data_json = json.dumps(data)
+                    to_verify = data_json + str(counter)
 
-                # Handle message based on type
-                msg_type = content_data.get("type")
-                if msg_type == "list_users":
-                    self.handle_list_users()
-                elif msg_type == "broadcast":
-                    self.handle_broadcast(content_data.get("body"))
-                elif msg_type == "private_message":
-                    self.handle_private_message(content_data)
-                elif msg_type == "get_public_key":
-                    self.handle_get_public_key(content_data)
-                elif msg_type == "shared_key":
-                    self.handle_shared_key(content_data)
-                elif msg_type == "upload":
-                    self.handle_file_upload(content_data)
-                elif msg_type == "download":
-                    self.handle_file_download(content_data)
-                elif msg_type == "file_list":
-                    self.handle_file_list()
+                    # Verify the signature
+                    if not verify_signature(self.client_public_key, to_verify, signature):
+                        logging.warning("Signature verification failed.")
+                        continue  # Discard the message
+
+                    # Check the counter to prevent replay attacks
+                    with ClientHandler.counters_lock:
+                        last_counter = ClientHandler.server_counters.get(self.username, 0)
+                        if counter <= last_counter:
+                            logging.warning("Replay attack detected or counter not increasing.")
+                            continue  # Discard the message
+
+                        # Update the counter
+                        ClientHandler.server_counters[self.username] = counter
+
+                    # Process the data
+                    msg_type = data.get("type")
+                    if msg_type == "list_users":
+                        self.handle_list_users()
+                    elif msg_type == "broadcast":
+                        self.handle_broadcast(data.get("body"))
+                    elif msg_type == "private_message":
+                        self.handle_private_message(data)
+                    elif msg_type == "get_public_key":
+                        self.handle_get_public_key(data)
+                    elif msg_type == "shared_key":
+                        self.handle_shared_key(data)
+                    elif msg_type == "upload":
+                        self.handle_file_upload(data)
+                    elif msg_type == "download":
+                        self.handle_file_download(data)
+                    elif msg_type == "file_list":
+                        self.handle_file_list()
+                    else:
+                        self.handle_message(data)
                 else:
-                    self.handle_message(content_data)
+                    logging.warning("Invalid message type received from client.")
 
         except Exception as e:
             logging.error(f"Error handling client {self.address}: {e}")
@@ -193,31 +241,57 @@ class ClientHandler(threading.Thread):
                 online_users.remove(self.username)
                 client_connections.pop(self.username, None)
                 client_handlers.pop(self.username, None)
+                with ClientHandler.counters_lock:
+                    ClientHandler.server_counters.pop(self.username, None)  # Remove counter tracking
                 logging.info(
                     f"User {self.username} disconnected. Online users: {online_users}"
                 )
             self.client_socket.close()
             logging.info(f"Connection with {self.address} closed.")
 
-    def send_response(self, response):
+    def send_response(self, data):
         """
-        Send a response to the client.
+        Send a response to the client with signature and encryption.
         """
-        response_json = json.dumps(response)
-        encrypted_response = encrypt_message(response_json, self.client_public_key)
-        encrypted_response_bytes = encrypted_response.encode("utf-8")
-        response_length = len(encrypted_response_bytes)
+        # Increment the counter
+        self.counter += 1
+
+        # Serialize the data
+        data_json = json.dumps(data)
+
+        # Concatenate data and counter for signing
+        to_sign = data_json + str(self.counter)
+
+        # Sign the concatenated string
+        signature = sign_message(self.server_private_key, to_sign)
+
+        # Construct the message according to the protocol
+        message = {
+            "type": "signed_data",
+            "data": data,
+            "counter": self.counter,
+            "signature": signature
+        }
+
+        # Convert the message to JSON
+        message_json = json.dumps(message)
+
+        # Encrypt the message
+        encrypted_message = encrypt_message(message_json, self.client_public_key)
+        encrypted_message_bytes = encrypted_message.encode("utf-8")
+        message_length = len(encrypted_message_bytes)
         with self.lock:
-            self.client_socket.sendall(response_length.to_bytes(4, byteorder="big"))
-            self.client_socket.sendall(encrypted_response_bytes)
+            self.client_socket.sendall(message_length.to_bytes(4, byteorder="big"))
+            self.client_socket.sendall(encrypted_message_bytes)
+
 
     def handle_list_users(self):
         """
         Handle a request for the list of online users.
         """
         user_list = list(online_users)
-        response = {"type": "user_list", "users": user_list}
-        self.send_response(response)
+        response_data = {"type": "user_list", "users": user_list}
+        self.send_response(response_data)
 
     def handle_broadcast(self, message_body):
         """
@@ -229,13 +303,12 @@ class ClientHandler(threading.Thread):
             "from": self.username,
             "message": message_body,
         }
-        message_json = json.dumps(broadcast_message)
 
         # Send the message to all connected clients except the sender
         for username, handler in client_handlers.items():
             if username != self.username:
                 try:
-                    handler.send_raw_message(message_json)
+                    handler.send_raw_message(broadcast_message)  # Pass dict directly
                 except Exception as e:
                     logging.error(f"Error sending broadcast to {username}: {e}")
 
@@ -245,7 +318,7 @@ class ClientHandler(threading.Thread):
         """
         recipient = content_data.get("to")
         encrypted_message = content_data.get("message")
-        counter = content_data.get("counter") # Counter for replay attack prevention
+        counter = content_data.get("counter")  # Counter for replay attack prevention
 
         if recipient in client_handlers:
             try:
@@ -254,11 +327,11 @@ class ClientHandler(threading.Thread):
                     "type": "private_message",
                     "from": self.username,
                     "message": encrypted_message,
-                    "counter": counter 
+                    "counter": counter
                 }
-                message_json = json.dumps(private_message)
+                # Pass dict directly without JSON serialization
                 recipient_handler = client_handlers[recipient]
-                recipient_handler.send_raw_message(message_json)
+                recipient_handler.send_raw_message(private_message)
                 logging.info(
                     f"Forwarded private message from {self.username} to {recipient}"
                 )
@@ -303,9 +376,8 @@ class ClientHandler(threading.Thread):
                     "from": self.username,
                     "encrypted_shared_key": encrypted_shared_key,
                 }
-                message_json = json.dumps(shared_key_message)
                 recipient_handler = client_handlers[recipient]
-                recipient_handler.send_raw_message(message_json)
+                recipient_handler.send_raw_message(shared_key_message)
                 logging.info(
                     f"Forwarded shared key from {self.username} to {recipient}"
                 )
@@ -357,9 +429,8 @@ class ClientHandler(threading.Thread):
                         "type": "notification",
                         "message": f"{self.username} has uploaded a file '{filename}' for you.",
                     }
-                    message_json = json.dumps(notification)
                     recipient_handler = client_handlers[recipient]
-                    recipient_handler.send_raw_message(message_json)
+                    recipient_handler.send_raw_message(notification)
                     logging.info(
                         f"Sent file upload notification to {recipient} for file '{filename}'"
                     )
@@ -371,11 +442,10 @@ class ClientHandler(threading.Thread):
                 "type": "notification",
                 "message": f"{self.username} has uploaded a new public file '{filename}'.",
             }
-            message_json = json.dumps(notification)
             for username, handler in client_handlers.items():
                 if username != self.username:
                     try:
-                        handler.send_raw_message(message_json)
+                        handler.send_raw_message(notification)
                         logging.info(
                             f"Sent public file upload notification to {username} for file '{filename}'"
                         )
@@ -453,10 +523,34 @@ class ClientHandler(threading.Thread):
         response = {"status": "success", "message": "Message received."}
         self.send_response(response)
 
-    def send_raw_message(self, message_json):
+    def send_raw_message(self, data):
         """
-        Send a raw message to the client without additional wrapping.
+        Send a message to the client with signature and encryption.
         """
+        # Increment the counter
+        self.counter += 1
+
+        # Serialize the data
+        data_json = json.dumps(data)
+
+        # Concatenate data and counter for signing
+        to_sign = data_json + str(self.counter)
+
+        # Sign the concatenated string
+        signature = sign_message(self.server_private_key, to_sign)
+
+        # Construct the message according to the protocol
+        message = {
+            "type": "signed_data",
+            "data": data,
+            "counter": self.counter,
+            "signature": signature
+        }
+
+        # Convert the message to JSON
+        message_json = json.dumps(message)
+
+        # Encrypt the message
         encrypted_message = encrypt_message(message_json, self.client_public_key)
         encrypted_message_bytes = encrypted_message.encode("utf-8")
         message_length = len(encrypted_message_bytes)

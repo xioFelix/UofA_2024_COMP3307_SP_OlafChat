@@ -43,6 +43,7 @@ class Client:
         self.message_queue = []  # Queue for outgoing messages
         self.message_counters = {}  # store message counters
         self.received_counters = {}  # store received counters
+        self.counter = 0  # Initialize the global message counter
 
     def connect(self):
         """
@@ -81,7 +82,7 @@ class Client:
 
         choice = input("Do you want to (r)egister or (l)ogin? ")
         if choice.lower() == "r":
-            message = {
+            data = {
                 "type": "register",
                 "username": self.username,
                 "public_key": serialize_public_key(
@@ -89,7 +90,7 @@ class Client:
                 ).decode("utf-8"),
             }
         elif choice.lower() == "l":
-            message = {
+            data = {
                 "type": "login",
                 "username": self.username,
                 "public_key": serialize_public_key(
@@ -101,7 +102,13 @@ class Client:
             self.socket.close()
             return False
 
-        self.socket.sendall(json.dumps(message).encode("utf-8"))
+        # Send the initial message without encryption and signature
+        message_json = json.dumps(data)
+        message_bytes = message_json.encode('utf-8')
+        message_length = len(message_bytes)
+        # Send the length of the message first
+        self.socket.sendall(message_length.to_bytes(4, byteorder="big"))
+        self.socket.sendall(message_bytes)
 
         # Receive and decrypt the response from the server
         raw_msglen = self.recvall(4)
@@ -118,30 +125,71 @@ class Client:
         decrypted_response = decrypt_message(
             response_data.decode("utf-8"), self.private_key
         )
-        response = json.loads(decrypted_response)
+        message = json.loads(decrypted_response)
 
-        if response["status"] == "success":
-            self.logged_in = True
-            print(response["message"])
-            return True
+        # Verify the message structure
+        if message.get("type") == "signed_data":
+            data = message.get("data")
+            counter = message.get("counter")
+            signature = message.get("signature")
+
+            # Concatenate data and counter for signature verification
+            data_json = json.dumps(data)
+            to_verify = data_json + str(counter)
+
+            # Verify the signature
+            if not verify_signature(self.server_public_key, to_verify, signature):
+                logging.warning("Signature verification failed for server response.")
+                self.socket.close()
+                return False
+
+            response = data
+
+            if response["status"] == "success":
+                self.logged_in = True
+                print(response["message"])
+                return True
+            else:
+                print(response["message"])
+                self.socket.close()
+                return False
         else:
-            print(response["message"])
+            print("Invalid response from server.")
             self.socket.close()
             return False
 
-    def send_message(self, content):
+    def send_message(self, data):
         """
         Send a message to the server with signature and encryption.
         """
-        # Sign the message
-        signature = sign_message(self.private_key, content)
-        message = {"content": content, "signature": signature}
+        # Increment the counter
+        self.counter += 1
+
+        # Serialize the data
+        data_json = json.dumps(data)
+
+        # Concatenate data and counter for signing
+        to_sign = data_json + str(self.counter)
+
+        # Sign the concatenated string
+        signature = sign_message(self.private_key, to_sign)
+
+        # Construct the message according to the protocol
+        message = {
+            "type": "signed_data",
+            "data": data,
+            "counter": self.counter,
+            "signature": signature
+        }
+
+        # Convert the message to JSON
         message_json = json.dumps(message)
 
         # Encrypt the message
         encrypted_message = encrypt_message(message_json, self.server_public_key)
         encrypted_message_bytes = encrypted_message.encode("utf-8")
         message_length = len(encrypted_message_bytes)
+
         # Send the length of the message first
         with self.lock:
             self.socket.sendall(message_length.to_bytes(4, byteorder="big"))
@@ -166,48 +214,69 @@ class Client:
                 decrypted_data = decrypt_message(
                     encrypted_data.decode("utf-8"), self.private_key
                 )
-                response = json.loads(decrypted_data)
-                msg_type = response.get("type")
-                if msg_type == "user_list":
-                    users = response.get("users")
-                    print(f"\nOnline users: {users}")
-                elif msg_type == "public_key":
-                    username = response.get("username")
-                    public_key_pem = response.get("public_key")
-                    self.user_public_keys[username] = public_key_pem
-                elif msg_type == "shared_key":
-                    sender = response.get("from")
-                    encrypted_shared_key_b64 = response.get("encrypted_shared_key")
-                    self.receive_shared_key(sender, encrypted_shared_key_b64)
-                elif msg_type == "private_message":
-                    sender = response.get("from")
-                    encrypted_message = response.get("message")
-                    counter = response.get("counter")  # get the counter value
-                    # Decrypt the message content, including the counter value
-                    message = self.decrypt_private_message(sender, encrypted_message, counter)
-                    print(f"\n[Private] {sender}: {message}")
-                elif msg_type == "broadcast":
-                    sender = response.get("from")
-                    message = response.get("message")
-                    print(f"\n[Broadcast] {sender}: {message}")
-                elif msg_type == "file_data":
-                    filename = response.get("filename")
-                    file_data_b64 = response.get("file_data")
-                    self.receive_file(filename, file_data_b64)
-                elif msg_type == "notification":
-                    message = response.get("message")
-                    print(f"\n[Notification]: {message}")
-                elif msg_type == "file_list":
-                    files = response.get("files")
-                    print(f"\nDownloadable files: {files}")
+                message = json.loads(decrypted_data)
+
+                # Verify the message structure
+                if message.get("type") == "signed_data":
+                    data = message.get("data")
+                    counter = message.get("counter")
+                    signature = message.get("signature")
+
+                    # Concatenate data and counter for signature verification
+                    data_json = json.dumps(data)
+                    to_verify = data_json + str(counter)
+
+                    # Verify the signature
+                    if not verify_signature(self.server_public_key, to_verify, signature):
+                        logging.warning("Signature verification failed for message from server.")
+                        continue  # Discard the message
+
+                    # Process the data
+                    msg_type = data.get("type")
+
+                    # Handle the data based on its internal type
+                    if msg_type == "user_list":
+                        users = data.get("users")
+                        print(f"\nOnline users: {users}")
+                    elif msg_type == "public_key":
+                        username = data.get("username")
+                        public_key_pem = data.get("public_key")
+                        self.user_public_keys[username] = public_key_pem
+                    elif msg_type == "shared_key":
+                        sender = data.get("from")
+                        encrypted_shared_key_b64 = data.get("encrypted_shared_key")
+                        self.receive_shared_key(sender, encrypted_shared_key_b64)
+                    elif msg_type == "private_message":
+                        sender = data.get("from")
+                        encrypted_message = data.get("message")
+                        counter = data.get("counter")
+                        # Decrypt the message content, including the counter value
+                        message_body = self.decrypt_private_message(sender, encrypted_message, counter)
+                        print(f"\n[Private] {sender}: {message_body}")
+                    elif msg_type == "broadcast":
+                        sender = data.get("from")
+                        message_body = data.get("message")
+                        print(f"\n[Broadcast] {sender}: {message_body}")
+                    elif msg_type == "file_data":
+                        filename = data.get("filename")
+                        file_data_b64 = data.get("file_data")
+                        self.receive_file(filename, file_data_b64)
+                    elif msg_type == "notification":
+                        message_body = data.get("message")
+                        print(f"\n[Notification]: {message_body}")
+                    elif msg_type == "file_list":
+                        files = data.get("files")
+                        print(f"\nDownloadable files: {files}")
+                    else:
+                        print(f"\nServer response: {data}")
+                    # Re-display the prompt
+                    print(
+                        f"Enter command or message ('/help' for commands): ",
+                        end="",
+                        flush=True,
+                    )
                 else:
-                    print(f"\nServer response: {response}")
-                # Re-display the prompt
-                print(
-                    f"Enter command or message ('/help' for commands): ",
-                    end="",
-                    flush=True,
-                )
+                    logging.warning("Invalid message type received.")
             except Exception as e:
                 logging.error(f"Error receiving message: {e}")
                 continue  # Continue to listen for messages
@@ -239,14 +308,14 @@ class Client:
                 elif message.lower() == "/list":
                     # Request online users list
                     content_data = {"type": "list_users"}
-                    content = json.dumps(content_data)
-                    self.send_message(content)
+                    # Pass dict directly
+                    self.send_message(content_data)
                 elif message.startswith("/all "):
                     # Send broadcast message
                     message_body = message[5:]
                     content_data = {"type": "broadcast", "body": message_body}
-                    content = json.dumps(content_data)
-                    self.send_message(content)
+                    # Pass dict directly
+                    self.send_message(content_data)
                 elif message.startswith("/msg "):
                     # Send private message: /msg <username> <message>
                     parts = message.split(" ", 2)
@@ -276,8 +345,8 @@ class Client:
                 elif message.lower() == "/files":
                     # Request file list
                     content_data = {"type": "file_list"}
-                    content = json.dumps(content_data)
-                    self.send_message(content)
+                    # Pass dict directly
+                    self.send_message(content_data)
                 elif message.lower() == "/help":
                     self.show_help()
                 else:
@@ -328,8 +397,8 @@ class Client:
             "message": encrypted_message_b64,
             "counter": counter  # 附加计数器值
         }
-        content = json.dumps(content_data)
-        self.send_message(content)
+        # Pass dict directly
+        self.send_message(content_data)
 
     def decrypt_private_message(self, sender, encrypted_message_b64, counter):
         """
@@ -396,8 +465,8 @@ class Client:
             "to": recipient,
             "encrypted_shared_key": encrypted_shared_key_b64,
         }
-        content = json.dumps(content_data)
-        self.send_message(content)
+        # Pass dict directly
+        self.send_message(content_data)
 
         # Store the shared key locally
         return shared_key
@@ -407,8 +476,8 @@ class Client:
         Request another user's public key from the server.
         """
         content_data = {"type": "get_public_key", "username": username}
-        content = json.dumps(content_data)
-        self.send_message(content)
+        # Pass dict directly
+        self.send_message(content_data)
 
     def receive_shared_key(self, sender, encrypted_shared_key_b64):
         """
@@ -434,8 +503,8 @@ class Client:
                 "file_data": file_data_b64,
                 "recipient": recipient,  # None means public
             }
-            content = json.dumps(content_data)
-            self.send_message(content)
+            # Pass dict directly
+            self.send_message(content_data)
             if recipient:
                 print(f"Uploading file {filename} to {recipient}...")
             else:
@@ -448,8 +517,8 @@ class Client:
         Request to download a file from the server.
         """
         content_data = {"type": "download", "filename": filename}
-        content = json.dumps(content_data)
-        self.send_message(content)
+        # Pass dict directly
+        self.send_message(content_data)
         print(f"Requesting file {filename}...")
 
     def receive_file(self, filename, file_data_b64):
