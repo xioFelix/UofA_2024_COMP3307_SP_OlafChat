@@ -1,2 +1,4 @@
 cryptography
 websockets
+flask
+requests
