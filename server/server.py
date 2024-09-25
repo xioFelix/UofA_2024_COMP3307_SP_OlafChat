@@ -342,6 +342,46 @@ async def handle_get_public_key(websocket, username, data):
         }
         await send_response(websocket, response)
 
+async def handle_broadcast(websocket, username, message_body):
+    if not message_body:
+        logging.warning(f"Broadcast message missing body from {username}.")
+        response = {"type": "status", "status": "error", "message": "Broadcast message missing body."}
+        await send_response(websocket, response)
+        return
+
+    broadcast_message = {
+        "type": "broadcast",
+        "from": username,
+        "message": message_body
+    }
+
+    # Encrypt and send broadcast message to all users except the sender
+    for user, ws in online_users.items():
+        if user != username:
+            recipient_public_key = user_public_keys.get(user)
+            if recipient_public_key:
+                try:
+                    encrypted_payload = encrypt_message(json.dumps(broadcast_message), recipient_public_key)
+                    await ws.send(encrypted_payload)
+                    logging.debug(f"Broadcast message sent to {user}.")
+                except Exception as e:
+                    logging.error(f"Failed to send broadcast message to {user}: {e}")
+                    response = {
+                        "type": "status",
+                        "status": "error",
+                        "message": f"Failed to send broadcast to {user}."
+                    }
+                    await send_response(websocket, response)
+                    continue
+            else:
+                logging.warning(f"No public key found for user {user}. Skipping broadcast.")
+    response = {
+        "type": "status",
+        "status": "success",
+        "message": "Broadcast message sent successfully."
+    }
+    await send_response(websocket, response)
+
 
 async def process_signed_data(websocket, data, username):
     msg_type = data.get("type")
