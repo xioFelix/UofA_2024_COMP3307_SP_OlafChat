@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import logging
 import os
 import base64
 import sys
@@ -12,11 +11,9 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from websockets import connect
 from aiohttp import ClientSession
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,  # Set to DEBUG for detailed logs
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+from src import ui
+logger = ui.init_logger('server')   # Initialize logger
+ui.set_log_level(logger, 'DEBUG')   # SET LOG LEVEL AT HERE
 
 # Utility functions
 def load_or_generate_user_keys(username):
@@ -27,7 +24,7 @@ def load_or_generate_user_keys(username):
                 key_file.read(),
                 password=None
             )
-        logging.info(f"Loaded existing private key from {key_filename}.")
+        logger.info(f"Loaded existing private key from {key_filename}.")
     else:
         private_key = rsa.generate_private_key(
             public_exponent=65537,
@@ -41,7 +38,7 @@ def load_or_generate_user_keys(username):
                     encryption_algorithm=serialization.NoEncryption()
                 )
             )
-        logging.info(f"Generated new private key and saved to {key_filename}.")
+        logger.info(f"Generated new private key and saved to {key_filename}.")
     public_key_pem = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -73,7 +70,7 @@ def verify_signature(public_key, message, signature_b64):
         )
         return True
     except Exception as e:
-        logging.warning(f"Signature verification failed: {e}")
+        logger.warning(f"Signature verification failed: {e}")
         return False
 
 def encrypt_message(message_json, recipient_public_key):
@@ -111,13 +108,13 @@ def encrypt_message(message_json, recipient_public_key):
         }
 
         # Debugging
-        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logging.debug(f"Tag length: {len(tag)} bytes")
-        logging.debug(f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes")
+        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.debug(f"Tag length: {len(tag)} bytes")
+        logger.debug(f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes")
 
         return json.dumps(encrypted_payload)
     except Exception as e:
-        logging.error(f"Encryption failed: {e}")
+        logger.error(f"Encryption failed: {e}")
         raise
 
 def decrypt_message(encrypted_payload_json, recipient_private_key):
@@ -142,8 +139,8 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
         tag = encrypted_message[-16:]
 
         # Debugging
-        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logging.debug(f"Tag length: {len(tag)} bytes")
+        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.debug(f"Tag length: {len(tag)} bytes")
 
         # AES-GCM decryption with tag
         decryptor = Cipher(
@@ -154,7 +151,7 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
 
         return decrypted_message.decode('utf-8')
     except Exception as e:
-        logging.error(f"Decryption failed: {e}")
+        logger.error(f"Decryption failed: {e}")
         raise
 
 class Client:
@@ -189,7 +186,7 @@ class Client:
                     if user_input == "":
                         continue
                     if user_input.lower() == "quit":
-                        logging.info("Exiting client.")
+                        logger.info("Exiting client.")
                         break
                     elif user_input.startswith("/list"):
                         await self.list_users()
@@ -229,17 +226,17 @@ class Client:
                     else:
                         print("Unknown command. Type /help for a list of commands.")
                 except Exception as e:
-                    logging.error(f"Error processing input: {e}")
+                    logger.error(f"Error processing input: {e}")
 
     async def initialize_keys(self):
         self.username = input("Enter your username: ").strip()
         self.private_key, self.public_key_pem = load_or_generate_user_keys(self.username)
-        logging.debug(f"Initialized keys for user {self.username}.")
+        logger.debug(f"Initialized keys for user {self.username}.")
 
     async def receive_server_public_key(self):
         server_pub_key_pem = await self.websocket.recv()
         self.server_public_key = serialization.load_pem_public_key(server_pub_key_pem.encode('utf-8'))
-        logging.debug("Received server's public key.")
+        logger.debug("Received server's public key.")
 
     async def login_or_register(self):
         choice = input("Do you want to (r)egister or (l)ogin? ").strip().lower()
@@ -287,9 +284,9 @@ class Client:
             message_json = json.dumps(signed_data)
             encrypted_payload = encrypt_message(message_json, self.server_public_key)
             await self.websocket.send(encrypted_payload)
-            logging.debug(f"Sent signed message: {signed_data}")
+            logger.debug(f"Sent signed message: {signed_data}")
         except Exception as e:
-            logging.error(f"Failed to send signed message: {e}")
+            logger.error(f"Failed to send signed message: {e}")
 
     async def listen(self):
         async for message in self.websocket:
@@ -298,7 +295,7 @@ class Client:
                 response = json.loads(decrypted_json)
                 await self.process_response(response)
             except Exception as e:
-                logging.error(f"Error processing incoming message: {e}")
+                logger.error(f"Error processing incoming message: {e}")
 
     async def process_response(self, response):
         msg_type = response.get("type")
@@ -306,16 +303,16 @@ class Client:
             status = response.get("status")
             message = response.get("message")
             print(f"{status.upper()}: {message}")
-            logging.debug(f"Received status: {status}, message: {message}")
+            logger.debug(f"Received status: {status}, message: {message}")
         elif msg_type == "client_list":
             users = response.get("servers")
             print(f"Online users: {users}")
-            logging.debug(f"Received client list: {users}")
+            logger.debug(f"Received client list: {users}")
         elif msg_type == "broadcast":
             sender = response.get("from")
             message = response.get("message")
             print(f"[Broadcast] {sender}: {message}")
-            logging.debug(f"Received broadcast from {sender}: {message}")
+            logger.debug(f"Received broadcast from {sender}: {message}")
         elif msg_type == "private_message":
             sender = response.get("from")
             encrypted_payload = response.get("message")
@@ -331,13 +328,13 @@ class Client:
                     public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
                     self.received_user_public_keys[target_username] = public_key
                     print(f"Received public key for {target_username}.")
-                    logging.debug(f"Received public key for {target_username}.")
+                    logger.debug(f"Received public key for {target_username}.")
                 except Exception as e:
-                    logging.error(f"Failed to load public key for {target_username}: {e}")
+                    logger.error(f"Failed to load public key for {target_username}: {e}")
             else:
-                logging.warning(f"Received malformed public key response: {response}")
+                logger.warning(f"Received malformed public key response: {response}")
         else:
-            logging.warning(f"Unhandled message type: {msg_type}")
+            logger.warning(f"Unhandled message type: {msg_type}")
 
     async def list_users(self):
         data = {
@@ -345,7 +342,7 @@ class Client:
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
-        logging.debug("Requested user list.")
+        logger.debug("Requested user list.")
 
     async def broadcast(self, message):
         data = {
@@ -354,14 +351,14 @@ class Client:
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
-        logging.debug(f"Broadcasted message: {message}")
+        logger.debug(f"Broadcasted message: {message}")
 
     async def private_message(self, recipient, message):
         # Retrieve recipient's public key from received_user_public_keys
         recipient_public_key = self.received_user_public_keys.get(recipient)
         if not recipient_public_key:
             print(f"Public key for user '{recipient}' not found. Use /get_public_key {recipient} to retrieve it.")
-            logging.warning(f"Public key for user '{recipient}' not found.")
+            logger.warning(f"Public key for user '{recipient}' not found.")
             return
 
         try:
@@ -405,9 +402,9 @@ class Client:
             }
             signed_data = self.create_signed_data(data)
             await self.send_signed_message(signed_data)
-            logging.debug(f"Sent private message to {recipient}.")
+            logger.debug(f"Sent private message to {recipient}.")
         except Exception as e:
-            logging.error(f"Failed to send private message to {recipient}: {e}")
+            logger.error(f"Failed to send private message to {recipient}: {e}")
 
     async def decrypt_private_message(self, sender, encrypted_payload, counter):
         # Decrypt AES key with client's private RSA key
@@ -425,7 +422,7 @@ class Client:
                 )
             )
         except Exception as e:
-            logging.error(f"Failed to decrypt AES key from {sender}: {e}")
+            logger.error(f"Failed to decrypt AES key from {sender}: {e}")
             return None
 
         # Separate ciphertext and tag
@@ -433,8 +430,8 @@ class Client:
         tag = encrypted_message[-16:]
 
         # Debugging
-        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logging.debug(f"Tag length: {len(tag)} bytes")
+        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.debug(f"Tag length: {len(tag)} bytes")
 
         # AES-GCM decryption with tag
         try:
@@ -445,7 +442,7 @@ class Client:
             decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
             return decrypted_message.decode('utf-8')
         except Exception as e:
-            logging.error(f"Failed to decrypt message from {sender}: {e}")
+            logger.error(f"Failed to decrypt message from {sender}: {e}")
             return None
 
     async def upload_file(self, filepath):
@@ -465,13 +462,13 @@ class Client:
                             result = await resp.json()
                             file_url = result.get("file_url")
                             print(f"File uploaded successfully: {file_url}")
-                            logging.debug(f"Uploaded file {filename}: {file_url}")
+                            logger.debug(f"Uploaded file {filename}: {file_url}")
                         else:
                             error = await resp.text()
                             print(f"Failed to upload file: {error}")
-                            logging.error(f"Failed to upload file {filename}: {error}")
+                            logger.error(f"Failed to upload file {filename}: {error}")
                 except Exception as e:
-                    logging.error(f"Exception during file upload: {e}")
+                    logger.error(f"Exception during file upload: {e}")
                     print(f"Exception during file upload: {e}")
 
     async def download_file(self, file_url):
@@ -490,13 +487,13 @@ class Client:
                                     break
                                 f.write(chunk)
                         print(f"File downloaded successfully: {file_path}")
-                        logging.debug(f"Downloaded file from {file_url} to {file_path}")
+                        logger.debug(f"Downloaded file from {file_url} to {file_path}")
                     else:
                         error = await resp.text()
                         print(f"Failed to download file: {error}")
-                        logging.error(f"Failed to download file from {file_url}: {error}")
+                        logger.error(f"Failed to download file from {file_url}: {error}")
             except Exception as e:
-                logging.error(f"Exception during file download: {e}")
+                logger.error(f"Exception during file download: {e}")
                 print(f"Exception during file download: {e}")
 
     async def get_public_key(self, target_username):
@@ -507,7 +504,7 @@ class Client:
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
-        logging.debug(f"Requested public key for {target_username}.")
+        logger.debug(f"Requested public key for {target_username}.")
 
     def show_help(self):
         help_text = """
@@ -522,16 +519,21 @@ Available commands:
     quit                          - Exit the chat.
         """
         print(help_text)
-        logging.debug("Displayed help information.")
+        logger.debug("Displayed help information.")
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        print("Usage: python client.py <server_ws_uri> <server_http_uri>")
-        print("Example: python client.py ws://localhost:8080 http://localhost:8000")
-        sys.exit(1)
+    # 设置默认 WebSocket 和 HTTP URI
+    default_ws_uri = "ws://localhost:8080"
+    default_http_uri = "http://localhost:8000"
 
-    server_ws_uri = sys.argv[1]
-    server_http_uri = sys.argv[2]
+    # 检查命令行参数
+    if len(sys.argv) == 3:
+        server_ws_uri = sys.argv[1]
+        server_http_uri = sys.argv[2]
+    else:
+        print(f"使用默认地址: WebSocket URI = {default_ws_uri}, HTTP URI = {default_http_uri}")
+        server_ws_uri = default_ws_uri
+        server_http_uri = default_http_uri
 
     client = Client(server_ws_uri, server_http_uri)
     asyncio.run(client.start())
