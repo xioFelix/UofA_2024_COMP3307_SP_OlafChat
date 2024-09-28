@@ -9,11 +9,15 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from websockets import serve
 from aiohttp import web
 
-# Configure logging
+from src import ui
+logger = ui.init_logger('server')   # Initialize logger
+ui.set_log_level(logger, 'DEBUG')   # SET LOG LEVEL AT HERE
+
+'''# Configure logging
 logging.basicConfig(
     level=logging.INFO,  # Set to INFO to reduce excessive debug logs
     format="%(asctime)s - %(levelname)s - %(message)s",
-)
+)'''
 
 # Global state
 online_users = {}  # username -> websocket
@@ -32,7 +36,7 @@ def load_or_generate_server_keys():
             private_key = serialization.load_pem_private_key(
                 key_file.read(), password=None
             )
-        logging.info("Loaded existing private key from server_private_key.pem.")
+        logger.debug("Loaded existing private key from server_private_key.pem.")
     else:
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         with open("server_private_key.pem", "wb") as key_file:
@@ -43,7 +47,7 @@ def load_or_generate_server_keys():
                     encryption_algorithm=serialization.NoEncryption(),
                 )
             )
-        logging.info("Generated new private key and saved to server_private_key.pem.")
+        logger.info("Generated new private key and saved to server_private_key.pem.")
     return private_key
 
 
@@ -79,7 +83,7 @@ def verify_signature(public_key, message, signature_b64):
         )
         return True
     except Exception as e:
-        logging.warning(f"Signature verification failed: {e}")
+        logger.warning(f"Signature verification failed: {e}")
         return False
 
 
@@ -114,15 +118,15 @@ def encrypt_message(message_json, recipient_public_key):
             "encrypted_message": base64.b64encode(encrypted_message).decode("utf-8"),
         }
 
-        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logging.debug(f"Tag length: {len(tag)} bytes")
-        logging.debug(
+        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.debug(f"Tag length: {len(tag)} bytes")
+        logger.debug(
             f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes"
         )
 
         return json.dumps(encrypted_payload)
     except Exception as e:
-        logging.error(f"Encryption failed: {e}")
+        logger.warning(f"Encryption failed: {e}")
         raise
 
 
@@ -145,8 +149,8 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
         ciphertext = encrypted_message[:-16]
         tag = encrypted_message[-16:]
 
-        logging.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logging.debug(f"Tag length: {len(tag)} bytes")
+        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.debug(f"Tag length: {len(tag)} bytes")
 
         decryptor = Cipher(
             algorithms.AES(aes_key),
@@ -156,14 +160,14 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
 
         return decrypted_message.decode("utf-8")
     except Exception as e:
-        logging.error(f"Decryption failed: {e}")
+        logger.error(f"Decryption failed: {e}")
         raise
 
 
 async def handler(websocket, path):
     try:
         await websocket.send(server_public_key_pem)
-        logging.debug(f"Sent server public key to {websocket.remote_address}.")
+        logger.debug(f"Sent server public key to {websocket.remote_address}.")
 
         async for message in websocket:
             try:
@@ -181,7 +185,7 @@ async def handler(websocket, path):
                     or counter is None
                     or not signature
                 ):
-                    logging.warning(
+                    logger.warning(
                         f"Malformed message from {websocket.remote_address}: {signed_data}"
                     )
                     continue
@@ -191,7 +195,7 @@ async def handler(websocket, path):
                 if sender_username:
                     sender_public_key = user_public_keys.get(sender_username)
                     if not sender_public_key:
-                        logging.warning(
+                        logger.warning(
                             f"No public key found for user {sender_username}."
                         )
                         continue
@@ -200,12 +204,12 @@ async def handler(websocket, path):
                     if not verify_signature(
                         sender_public_key, expected_message, signature
                     ):
-                        logging.warning(f"Invalid signature from {sender_username}.")
+                        logger.warning(f"Invalid signature from {sender_username}.")
                         continue
 
                     last_counter = last_counters.get(sender_username, 0)
                     if counter <= last_counter:
-                        logging.warning(
+                        logger.warning(
                             f"Replay attack detected from {sender_username}. Counter: {counter}"
                         )
                         continue
@@ -219,27 +223,27 @@ async def handler(websocket, path):
                             websocket, data, counter, signature
                         )
                     else:
-                        logging.warning(
+                        logger.warning(
                             f"Unauthenticated message from {websocket.remote_address}: {data.get('type')}"
                         )
                         continue
 
             except Exception as e:
-                logging.error(
+                logger.error(
                     f"Error processing message from {websocket.remote_address}: {e}"
                 )
                 await websocket.close(code=1011, reason="Internal server error")
                 break
 
     except Exception as e:
-        logging.error(f"Connection error with {websocket.remote_address}: {e}")
+        logger.error(f"Connection error with {websocket.remote_address}: {e}")
     finally:
         username = get_username_by_websocket(websocket)
         if username:
             del online_users[username]
             del user_public_keys[username]
             del last_counters[username]
-            logging.info(
+            logger.info(
                 f"User {username} disconnected. Online users: {set(online_users.keys())}"
             )
 
@@ -257,7 +261,7 @@ async def process_signed_data_initial(websocket, data, counter, signature):
     public_key_pem = data.get("public_key")
 
     if not username or not public_key_pem:
-        logging.warning("Hello/Login message missing username or public_key.")
+        logger.warning("Hello/Login message missing username or public_key.")
         response = {
             "type": "status",
             "status": "error",
@@ -267,7 +271,7 @@ async def process_signed_data_initial(websocket, data, counter, signature):
         return
 
     if username in online_users:
-        logging.warning(f"Username {username} already online.")
+        logger.warning(f"Username {username} already online.")
         response = {
             "type": "status",
             "status": "error",
@@ -278,9 +282,9 @@ async def process_signed_data_initial(websocket, data, counter, signature):
 
     try:
         public_key = serialization.load_pem_public_key(public_key_pem.encode("utf-8"))
-        logging.debug(f"Loaded public key for user {username}.")
+        logger.debug(f"Loaded public key for user {username}.")
     except Exception as e:
-        logging.warning(f"Invalid public key format from {username}: {e}")
+        logger.warning(f"Invalid public key format from {username}: {e}")
         response = {
             "type": "status",
             "status": "error",
@@ -292,7 +296,7 @@ async def process_signed_data_initial(websocket, data, counter, signature):
     if msg_type == "hello":
         online_users[username] = websocket
         user_public_keys[username] = public_key
-        logging.info(
+        logger.info(
             f"User {username} connected. Online users: {set(online_users.keys())}"
         )
 
@@ -302,7 +306,7 @@ async def process_signed_data_initial(websocket, data, counter, signature):
     elif msg_type == "login":
         online_users[username] = websocket
         user_public_keys[username] = public_key
-        logging.info(
+        logger.info(
             f"User {username} logged in successfully. Online users: {set(online_users.keys())}"
         )
 
@@ -333,9 +337,9 @@ async def handle_get_public_key(websocket, username, data):
             "public_key": public_key_pem,
         }
         await send_response(websocket, response)
-        logging.info(f"Sent public key for {target_username}")
+        logger.info(f"Sent public key for {target_username}")
     else:
-        logging.warning(f"Public key for user '{target_username}' not found.")
+        logger.warning(f"Public key for user '{target_username}' not found.")
         response = {
             "type": "error",
             "message": f"Public key for {target_username} not found.",
@@ -344,7 +348,7 @@ async def handle_get_public_key(websocket, username, data):
 
 async def handle_broadcast(websocket, username, message_body):
     if not message_body:
-        logging.warning(f"Broadcast message missing body from {username}.")
+        logger.warning(f"Broadcast message missing body from {username}.")
         response = {"type": "status", "status": "error", "message": "Broadcast message missing body."}
         await send_response(websocket, response)
         return
@@ -363,9 +367,9 @@ async def handle_broadcast(websocket, username, message_body):
                 try:
                     encrypted_payload = encrypt_message(json.dumps(broadcast_message), recipient_public_key)
                     await ws.send(encrypted_payload)
-                    logging.debug(f"Broadcast message sent to {user}.")
+                    logger.debug(f"Broadcast message sent to {user}.")
                 except Exception as e:
-                    logging.error(f"Failed to send broadcast message to {user}: {e}")
+                    logger.error(f"Failed to send broadcast message to {user}: {e}")
                     response = {
                         "type": "status",
                         "status": "error",
@@ -374,7 +378,7 @@ async def handle_broadcast(websocket, username, message_body):
                     await send_response(websocket, response)
                     continue
             else:
-                logging.warning(f"No public key found for user {user}. Skipping broadcast.")
+                logger.warning(f"No public key found for user {user}. Skipping broadcast.")
     response = {
         "type": "status",
         "status": "success",
@@ -395,14 +399,14 @@ async def process_signed_data(websocket, data, username):
     elif msg_type == "get_public_key":  # Added handling for get_public_key
         await handle_get_public_key(websocket, username, data)
     else:
-        logging.warning(f"Unhandled message type from {username}: {msg_type}")
+        logger.warning(f"Unhandled message type from {username}: {msg_type}")
 
 
 async def handle_list_users(websocket, username):
     users = list(online_users.keys())
     response = {"type": "client_list", "servers": users}
     await send_response(websocket, response)
-    logging.debug(f"Sent client list to {username}.")
+    logger.debug(f"Sent client list to {username}.")
 
 
 async def handle_private_message(websocket, username, data):
@@ -411,7 +415,7 @@ async def handle_private_message(websocket, username, data):
     counter = data.get("counter")
 
     if not recipient or not message_body or counter is None:
-        logging.warning(f"Private message from {username} missing fields.")
+        logger.warning(f"Private message from {username} missing fields.")
         response = {
             "type": "status",
             "status": "error",
@@ -421,7 +425,7 @@ async def handle_private_message(websocket, username, data):
         return
 
     if recipient not in online_users:
-        logging.warning(f"Private message recipient {recipient} not online.")
+        logger.warning(f"Private message recipient {recipient} not online.")
         response = {
             "type": "status",
             "status": "error",
@@ -434,7 +438,7 @@ async def handle_private_message(websocket, username, data):
     recipient_public_key = user_public_keys.get(recipient)
 
     if not recipient_public_key:
-        logging.warning(f"No public key found for user {recipient}.")
+        logger.warning(f"No public key found for user {recipient}.")
         response = {
             "type": "status",
             "status": "error",
@@ -455,9 +459,9 @@ async def handle_private_message(websocket, username, data):
             json.dumps(private_message), recipient_public_key
         )
         await recipient_ws.send(encrypted_payload_for_recipient)
-        logging.debug(f"Private message from {username} sent to {recipient}.")
+        logger.debug(f"Private message from {username} sent to {recipient}.")
     except Exception as e:
-        logging.error(
+        logger.error(
             f"Failed to send private message from {username} to {recipient}: {e}"
         )
         response = {
@@ -471,12 +475,12 @@ async def handle_private_message(websocket, username, data):
 async def send_response(websocket, response):
     username = get_username_by_websocket(websocket)
     if not username:
-        logging.warning("Attempted to send response to unidentified websocket.")
+        logger.warning("Attempted to send response to unidentified websocket.")
         return
 
     recipient_public_key = user_public_keys.get(username)
     if not recipient_public_key:
-        logging.warning(
+        logger.warning(
             f"No public key found for user {username}. Cannot send response."
         )
         return
@@ -484,9 +488,9 @@ async def send_response(websocket, response):
     try:
         encrypted_response = encrypt_message(json.dumps(response), recipient_public_key)
         await websocket.send(encrypted_response)
-        logging.debug(f"Sent response to {username}: {response}")
+        logger.debug(f"Sent response to {username}: {response}")
     except Exception as e:
-        logging.error(f"Failed to send response to {username}: {e}")
+        logger.error(f"Failed to send response to {username}: {e}")
 
 
 # HTTP Handlers for File Upload and Download
@@ -507,7 +511,7 @@ async def handle_upload(request):
             f.write(chunk)
 
     file_url = f"http://{request.host}/files/{filename}"
-    logging.info(f"File uploaded: {filename} -> {file_url}")
+    logger.info(f"File uploaded: {filename} -> {file_url}")
     return web.json_response(
         {"type": "status", "status": "success", "file_url": file_url}
     )
@@ -533,14 +537,14 @@ def start_http_server():
 async def main():
     ws_server = serve(handler, "0.0.0.0", 8080)
     asyncio.ensure_future(ws_server)
-    logging.info("WebSocket server started on ws://0.0.0.0:8080")
+    logger.system("WebSocket server started on ws://0.0.0.0:8080")
 
     app = start_http_server()
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8000)
     await site.start()
-    logging.info("HTTP server started on http://0.0.0.0:8000")
+    logger.system("HTTP server started on http://0.0.0.0:8000")
 
     await asyncio.Future()
 
