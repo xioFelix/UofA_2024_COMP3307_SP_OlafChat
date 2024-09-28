@@ -1,7 +1,10 @@
+# server.py
 import asyncio
 import json
 import os
 import base64
+import argparse
+import signal
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -526,7 +529,49 @@ def start_http_server():
     app.router.add_get("/files/{filename}", handle_download)
     return app
 
+async def start(port=8000, host='0.0.0.0'):
+    # Automatically assign HTTP port as WebSocket port + 100
+    http_port = port + 100
 
+    # Start WebSocket server
+    ws_server = serve(handler, host, port)
+    asyncio.ensure_future(ws_server)
+    logger.system(f"WebSocket server started on ws://{host}:{port}")
+
+    # Start HTTP server
+    app = start_http_server()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, host, http_port)
+    await site.start()
+    logger.system(f"HTTP server started on http://{host}:{http_port}")
+
+    await asyncio.Future()  # Keeps the server running
+
+async def close():
+    # Add code to properly close WebSocket and HTTP server, and cleanup if necessary
+    logger.system("Shutting down servers...")
+    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    [task.cancel() for task in tasks]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+if __name__ == "__main__":
+    # Setup argument parser
+    parser = argparse.ArgumentParser(description="Start the WebSocket and HTTP server.")
+    parser.add_argument("-p", "--port", type=int, default=8000, help="WebSocket server port (default: 8000)")
+    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the servers (default: 0.0.0.0)")
+
+    args = parser.parse_args()
+
+    # Use the arguments to start
+    try:
+        asyncio.run(start(port=args.port, host=args.host))
+    except KeyboardInterrupt:
+        asyncio.run(close())
+        logger.system("Server closed.")
+
+'''
+旧的启动接口，我使用注释禁用了。
 async def main():
     ws_server = serve(handler, "0.0.0.0", 8080)
     asyncio.ensure_future(ws_server)
@@ -541,6 +586,6 @@ async def main():
 
     await asyncio.Future()
 
-
 if __name__ == "__main__":
     asyncio.run(main())
+'''

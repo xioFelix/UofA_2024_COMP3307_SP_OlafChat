@@ -1,10 +1,11 @@
 # client.py
-
 import asyncio
 import json
 import os
 import base64
 import sys
+import argparse
+import signal
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -166,67 +167,76 @@ class Client:
         self.received_user_public_keys = {}  # username -> public_key
 
     async def start(self):
-        await self.initialize_keys()
-        async with connect(self.server_ws_uri) as websocket:
-            self.websocket = websocket
-            await self.receive_server_public_key()
+        try:
+            await self.initialize_keys()
+            async with connect(self.server_ws_uri) as websocket:
+                self.websocket = websocket
+                await self.receive_server_public_key()
 
-            await self.login_or_register()
+                await self.login_or_register()
 
-            # Start listener
-            asyncio.create_task(self.listen())
+                # Start listener
+                asyncio.create_task(self.listen())
 
-            # Main loop for user input
-            while True:
-                try:
-                    user_input = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
-                    if not user_input:
-                        break
-                    user_input = user_input.strip()
-                    if user_input == "":
-                        continue
-                    if user_input.lower() == "quit":
-                        logger.info("Exiting client.")
-                        break
-                    elif user_input.startswith("/list"):
-                        await self.list_users()
-                    elif user_input.startswith("/broadcast "):
-                        message = user_input[len("/broadcast "):]
-                        await self.broadcast(message)
-                    elif user_input.startswith("/msg "):
-                        parts = user_input.split(" ", 2)
-                        if len(parts) < 3:
-                            print("Usage: /msg <username> <message>")
+                # Main loop for user input
+                while True:
+                    try:
+                        user_input = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+                        if not user_input:
+                            break
+                        user_input = user_input.strip()
+                        if user_input == "":
                             continue
-                        recipient, message = parts[1], parts[2]
-                        await self.private_message(recipient, message)
-                    elif user_input.startswith("/upload "):
-                        parts = user_input.split(" ", 1)
-                        if len(parts) < 2:
-                            print("Usage: /upload <filepath>")
-                            continue
-                        filepath = parts[1]
-                        await self.upload_file(filepath)
-                    elif user_input.startswith("/download "):
-                        parts = user_input.split(" ", 1)
-                        if len(parts) < 2:
-                            print("Usage: /download <file_url>")
-                            continue
-                        file_url = parts[1]
-                        await self.download_file(file_url)
-                    elif user_input.startswith("/get_public_key "):
-                        parts = user_input.split(" ", 1)
-                        if len(parts) < 2:
-                            print("Usage: /get_public_key <username>")
-                            continue
-                        target_username = parts[1]
-                        await self.get_public_key(target_username)
-                    elif user_input.startswith("/help"):
-                        self.show_help()
-                    else:
-                        print("Unknown command. Type /help for a list of commands.")
-                except Exception as e:
-                    logger.error(f"Error processing input: {e}")
+                        if user_input.lower() == "quit":
+                            logger.info("Exiting client.")
+                            break
+                        elif user_input.startswith("/list"):
+                            await self.list_users()
+                        elif user_input.startswith("/broadcast "):
+                            message = user_input[len("/broadcast "):]
+                            await self.broadcast(message)
+                        elif user_input.startswith("/msg "):
+                            parts = user_input.split(" ", 2)
+                            if len(parts) < 3:
+                                print("Usage: /msg <username> <message>")
+                                continue
+                            recipient, message = parts[1], parts[2]
+                            await self.private_message(recipient, message)
+                        elif user_input.startswith("/upload "):
+                            parts = user_input.split(" ", 1)
+                            if len(parts) < 2:
+                                print("Usage: /upload <filepath>")
+                                continue
+                            filepath = parts[1]
+                            await self.upload_file(filepath)
+                        elif user_input.startswith("/download "):
+                            parts = user_input.split(" ", 1)
+                            if len(parts) < 2:
+                                print("Usage: /download <file_url>")
+                                continue
+                            file_url = parts[1]
+                            await self.download_file(file_url)
+                        elif user_input.startswith("/get_public_key "):
+                            parts = user_input.split(" ", 1)
+                            if len(parts) < 2:
+                                print("Usage: /get_public_key <username>")
+                                continue
+                            target_username = parts[1]
+                            await self.get_public_key(target_username)
+                        elif user_input.startswith("/help"):
+                            self.show_help()
+                        else:
+                            print("Unknown command. Type /help for a list of commands.")
+                    except Exception as e:
+                        logger.error(f"Error processing input: {e}")
+        except KeyboardInterrupt:
+            await self.close()
+
+    async def close(self):
+        if self.websocket:
+            await self.websocket.close()
+            logger.info("WebSocket connection closed.")
+        logger.info("Client closed.")        
 
     async def initialize_keys(self):
         self.username = input("Enter your username: ").strip()
@@ -521,10 +531,33 @@ Available commands:
         print(help_text)
         logger.debug("Displayed help information.")
 
+async def start_client(host='localhost', port=8000):
+    # 自动定义 HTTP URI
+    server_ws_uri = f"ws://{host}:{port}"
+    server_http_uri = f"http://{host}:{port + 100}"
+
+    client = Client(server_ws_uri, server_http_uri)
+    await client.start()
+
+if __name__ == "__main__":
+    # 设置命令行参数解析
+    parser = argparse.ArgumentParser(description="Start the chat client.")
+    parser.add_argument("-p", "--port", type=int, default=8000, help="WebSocket server port (default: 8000)")
+    parser.add_argument("--host", type=str, default="localhost", help="Server host (default: localhost)")
+
+    args = parser.parse_args()
+
+    # 启动客户端
+    try:
+        asyncio.run(start_client(host=args.host, port=args.port))
+    except KeyboardInterrupt:
+        logger.info("Client closed.")
+
+'''
 if __name__ == "__main__":
     # 设置默认 WebSocket 和 HTTP URI
-    default_ws_uri = "ws://localhost:8080"
-    default_http_uri = "http://localhost:8000"
+    default_ws_uri = "ws://localhost:8000"
+    default_http_uri = "http://localhost:8100"
 
     # 检查命令行参数
     if len(sys.argv) == 3:
@@ -537,3 +570,4 @@ if __name__ == "__main__":
 
     client = Client(server_ws_uri, server_http_uri)
     asyncio.run(client.start())
+'''

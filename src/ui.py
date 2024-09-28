@@ -1,29 +1,38 @@
+#ui.py
 import logging
 from colorama import Fore, Style, init
 
 # Initialize colorama
 init(autoreset=True)
 
-# Added a self-defined log level "system" at level 25
-SYSTEM_LEVEL_NUM = 25
+# Define custom log levels
+TRACE_LEVEL_NUM = 5  # New level below DEBUG
+SYSTEM_LEVEL_NUM = 25  # Existing custom level
+logging.addLevelName(TRACE_LEVEL_NUM, "TRACE")
 logging.addLevelName(SYSTEM_LEVEL_NUM, "SYSTEM")
 
-# Extend the Logger class with a new method "system"
+# Extend Logger class to add trace and system methods
+def trace(self, message, *args, **kwargs):
+    if self.isEnabledFor(TRACE_LEVEL_NUM):
+        self._log(TRACE_LEVEL_NUM, message, args, **kwargs)
+
 def system(self, message, *args, **kwargs):
     if self.isEnabledFor(SYSTEM_LEVEL_NUM):
         self._log(SYSTEM_LEVEL_NUM, message, args, **kwargs)
 
+logging.Logger.trace = trace
 logging.Logger.system = system
 
 # Define the color
 class ColoredFormatter(logging.Formatter):
     COLORS = {
-        'DEBUG': Fore.YELLOW,
+        'TRACE': Fore.LIGHTCYAN_EX,
+        'DEBUG': Fore.LIGHTYELLOW_EX,
         'INFO': Fore.LIGHTGREEN_EX,
         'SYSTEM': Fore.LIGHTBLUE_EX,
-        'WARNING': Fore.LIGHTYELLOW_EX,
-        'ERROR': Fore.RED,
-        'CRITICAL': Fore.MAGENTA,
+        'WARNING': '\033[38;5;214m',
+        'ERROR': Fore.LIGHTRED_EX,
+        'CRITICAL': Fore.LIGHTMAGENTA_EX,
     }
 
     def format(self, record):
@@ -57,21 +66,26 @@ def init_logger(name='app', level=logging.INFO):
 
     return logger
 
-# Set the log level diamiclly
+# Set the log level dynamically
 def set_log_level(logger, level_name):
-    level = getattr(logging, level_name.upper(), logging.INFO)
-    logger.setLevel(level)
+    # Convert level name to upper case and get the corresponding level
+    level = logging.getLevelName(level_name.upper())
+    if isinstance(level, int):  # Check if the level is valid
+        logger.setLevel(level)
+    else:
+        logger.setLevel(logging.INFO)  # Default to INFO if the level is not found
 
-# Test script for ui.py only
+# Test script for ui.py only, not included in the main program
 if __name__ == "__main__":
     logger = init_logger()
     
     # Set the level to DEBUG
-    set_log_level(logger, 'DEBUG')
+    set_log_level(logger, 'TRACE')
 
-    logger.debug("这是调试信息")
-    logger.info("这是一般信息")
-    logger.system("这是系统级信息")
-    logger.warning("这是警告信息")
-    logger.error("这是错误信息")
-    logger.critical("这是严重错误信息")
+    logger.trace("This is a trace message, for debugging a stable feature (usually not activated).")
+    logger.debug("This is a debug message, for debugging a feature (should be actived only in debug mode).")
+    logger.info("This is an information message, for general information.")
+    logger.system("This is a system message, for system information.")
+    logger.warning("This is a warning message, for warning information.")
+    logger.error("This is an error message, for error information")
+    logger.critical("This is a critical message, for critical information.")
