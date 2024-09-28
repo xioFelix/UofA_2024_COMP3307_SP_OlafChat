@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import os
 import base64
 from cryptography.hazmat.primitives import hashes, serialization
@@ -12,12 +11,6 @@ from aiohttp import web
 from src import ui
 logger = ui.init_logger('server')   # Initialize logger
 ui.set_log_level(logger, 'DEBUG')   # SET LOG LEVEL AT HERE
-
-'''# Configure logging
-logging.basicConfig(
-    level=logging.INFO,  # Set to INFO to reduce excessive debug logs
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)'''
 
 # Global state
 online_users = {}  # username -> websocket
