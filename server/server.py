@@ -32,7 +32,7 @@ def load_or_generate_server_keys():
             private_key = serialization.load_pem_private_key(
                 key_file.read(), password=None
             )
-        logger.debug("Loaded existing private key from server_private_key.pem.")
+        logger.trace("Loaded existing private key from server_private_key.pem.")
     else:
         private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         with open("server_private_key.pem", "wb") as key_file:
@@ -114,9 +114,9 @@ def encrypt_message(message_json, recipient_public_key):
             "encrypted_message": base64.b64encode(encrypted_message).decode("utf-8"),
         }
 
-        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logger.debug(f"Tag length: {len(tag)} bytes")
-        logger.debug(
+        logger.trace(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.trace(f"Tag length: {len(tag)} bytes")
+        logger.trace(
             f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes"
         )
 
@@ -568,7 +568,7 @@ if __name__ == "__main__":
         asyncio.run(start(port=args.port, host=args.host))
     except KeyboardInterrupt:
         asyncio.run(close())
-        logger.system("Server closed.")
+        logger.trace("Server closed.")
 
 '''
 旧的启动接口，我使用注释禁用了。

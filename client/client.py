@@ -25,7 +25,7 @@ def load_or_generate_user_keys(username):
                 key_file.read(),
                 password=None
             )
-        logger.info(f"Loaded existing private key from {key_filename}.")
+        logger.trace(f"Loaded existing private key from {key_filename}.")
     else:
         private_key = rsa.generate_private_key(
             public_exponent=65537,
@@ -39,7 +39,7 @@ def load_or_generate_user_keys(username):
                     encryption_algorithm=serialization.NoEncryption()
                 )
             )
-        logger.info(f"Generated new private key and saved to {key_filename}.")
+        logger.system(f"Generated new private key and saved to {key_filename}.")
     public_key_pem = private_key.public_key().public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -109,9 +109,9 @@ def encrypt_message(message_json, recipient_public_key):
         }
 
         # Debugging
-        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logger.debug(f"Tag length: {len(tag)} bytes")
-        logger.debug(f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes")
+        logger.trace(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.trace(f"Tag length: {len(tag)} bytes")
+        logger.trace(f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes")
 
         return json.dumps(encrypted_payload)
     except Exception as e:
@@ -140,8 +140,8 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
         tag = encrypted_message[-16:]
 
         # Debugging
-        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-        logger.debug(f"Tag length: {len(tag)} bytes")
+        logger.trace(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.trace(f"Tag length: {len(tag)} bytes")
 
         # AES-GCM decryption with tag
         decryptor = Cipher(
@@ -188,45 +188,45 @@ class Client:
                         if user_input == "":
                             continue
                         if user_input.lower() == "quit":
-                            logger.info("Exiting client.")
+                            logger.system("Client shutting down...")
                             break
                         elif user_input.startswith("/list"):
                             await self.list_users()
-                        elif user_input.startswith("/broadcast "):
-                            message = user_input[len("/broadcast "):]
+                        elif user_input.startswith("/broadcast ") or user_input.startswith("/all "):
+                            message = user_input.split(" ", 1)[1]
                             await self.broadcast(message)
                         elif user_input.startswith("/msg "):
                             parts = user_input.split(" ", 2)
                             if len(parts) < 3:
-                                print("Usage: /msg <username> <message>")
+                                logger.system("Usage: /msg <username> <message>")
                                 continue
                             recipient, message = parts[1], parts[2]
                             await self.private_message(recipient, message)
                         elif user_input.startswith("/upload "):
                             parts = user_input.split(" ", 1)
                             if len(parts) < 2:
-                                print("Usage: /upload <filepath>")
+                                logger.system("Usage: /upload <filepath>")
                                 continue
                             filepath = parts[1]
                             await self.upload_file(filepath)
                         elif user_input.startswith("/download "):
                             parts = user_input.split(" ", 1)
                             if len(parts) < 2:
-                                print("Usage: /download <file_url>")
+                                logger.system("Usage: /download <file_url>")
                                 continue
                             file_url = parts[1]
                             await self.download_file(file_url)
-                        elif user_input.startswith("/get_public_key "):
+                        elif user_input.startswith("/get_public_key ") or user_input.startswith("/add "):
                             parts = user_input.split(" ", 1)
                             if len(parts) < 2:
-                                print("Usage: /get_public_key <username>")
+                                logger.system("Usage: /get_public_key <username>")
                                 continue
-                            target_username = parts[1]
+                            target_username = user_input.split(" ", 1)[1]
                             await self.get_public_key(target_username)
                         elif user_input.startswith("/help"):
                             self.show_help()
                         else:
-                            print("Unknown command. Type /help for a list of commands.")
+                            logger.warning("Unknown command. Type /help for a list of commands.")
                     except Exception as e:
                         logger.error(f"Error processing input: {e}")
         except KeyboardInterrupt:
@@ -235,18 +235,18 @@ class Client:
     async def close(self):
         if self.websocket:
             await self.websocket.close()
-            logger.info("WebSocket connection closed.")
-        logger.info("Client closed.")        
+            logger.system("WebSocket connection closed.")
+        logger.system("Client closed.")        
 
     async def initialize_keys(self):
         self.username = input("Enter your username: ").strip()
         self.private_key, self.public_key_pem = load_or_generate_user_keys(self.username)
-        logger.debug(f"Initialized keys for user {self.username}.")
+        logger.trace(f"Initialized keys for user {self.username}.")
 
     async def receive_server_public_key(self):
         server_pub_key_pem = await self.websocket.recv()
         self.server_public_key = serialization.load_pem_public_key(server_pub_key_pem.encode('utf-8'))
-        logger.debug("Received server's public key.")
+        logger.trace("Received server's public key.")
 
     async def login_or_register(self):
         choice = input("Do you want to (r)egister or (l)ogin? ").strip().lower()
@@ -294,7 +294,7 @@ class Client:
             message_json = json.dumps(signed_data)
             encrypted_payload = encrypt_message(message_json, self.server_public_key)
             await self.websocket.send(encrypted_payload)
-            logger.debug(f"Sent signed message: {signed_data}")
+            logger.trace(f"Sent signed message: {signed_data}")
         except Exception as e:
             logger.error(f"Failed to send signed message: {e}")
 
@@ -316,20 +316,20 @@ class Client:
             logger.debug(f"Received status: {status}, message: {message}")
         elif msg_type == "client_list":
             users = response.get("servers")
-            print(f"Online users: {users}")
-            logger.debug(f"Received client list: {users}")
+            logger.system(f"Online users: {users}")
+            logger.trace(f"Received client list: {users}")
         elif msg_type == "broadcast":
             sender = response.get("from")
             message = response.get("message")
-            print(f"[Broadcast] {sender}: {message}")
-            logger.debug(f"Received broadcast from {sender}: {message}")
+            logger.info(f"[Broadcast] {sender}: {message}")
+            logger.trace(f"Received broadcast from {sender}: {message}")
         elif msg_type == "private_message":
             sender = response.get("from")
             encrypted_payload = response.get("message")
             counter = response.get("counter")
             message = await self.decrypt_private_message(sender, encrypted_payload, counter)
             if message:
-                print(f"[Private] {sender}: {message}")
+                logger.info(f"[Private] {sender}: {message}")
         elif msg_type == "public_key":
             target_username = response.get("username")
             public_key_pem = response.get("public_key")
@@ -337,7 +337,6 @@ class Client:
                 try:
                     public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
                     self.received_user_public_keys[target_username] = public_key
-                    print(f"Received public key for {target_username}.")
                     logger.debug(f"Received public key for {target_username}.")
                 except Exception as e:
                     logger.error(f"Failed to load public key for {target_username}: {e}")
@@ -352,7 +351,7 @@ class Client:
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
-        logger.debug("Requested user list.")
+        logger.trace("Requested user list.")
 
     async def broadcast(self, message):
         data = {
@@ -367,7 +366,7 @@ class Client:
         # Retrieve recipient's public key from received_user_public_keys
         recipient_public_key = self.received_user_public_keys.get(recipient)
         if not recipient_public_key:
-            print(f"Public key for user '{recipient}' not found. Use /get_public_key {recipient} to retrieve it.")
+            logger.error(f"Public key for user '{recipient}' not found. Use /get_public_key {recipient} to retrieve it.")
             logger.warning(f"Public key for user '{recipient}' not found.")
             return
 
@@ -529,10 +528,10 @@ Available commands:
     quit                          - Exit the chat.
         """
         print(help_text)
-        logger.debug("Displayed help information.")
+        logger.trace("Displayed help information.")
 
 async def start_client(host='localhost', port=8000):
-    # 自动定义 HTTP URI
+    # Define HTTP URI automatically
     server_ws_uri = f"ws://{host}:{port}"
     server_http_uri = f"http://{host}:{port + 100}"
 
@@ -540,18 +539,18 @@ async def start_client(host='localhost', port=8000):
     await client.start()
 
 if __name__ == "__main__":
-    # 设置命令行参数解析
+    # Set up command-line arguments
     parser = argparse.ArgumentParser(description="Start the chat client.")
     parser.add_argument("-p", "--port", type=int, default=8000, help="WebSocket server port (default: 8000)")
     parser.add_argument("--host", type=str, default="localhost", help="Server host (default: localhost)")
 
     args = parser.parse_args()
 
-    # 启动客户端
+    # Start the client
     try:
         asyncio.run(start_client(host=args.host, port=args.port))
     except KeyboardInterrupt:
-        logger.info("Client closed.")
+        logger.system("Client closed.")
 
 '''
 if __name__ == "__main__":
