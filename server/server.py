@@ -569,23 +569,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         asyncio.run(close())
         logger.trace("Server closed.")
-
-'''
-旧的启动接口，我使用注释禁用了。
-async def main():
-    ws_server = serve(handler, "0.0.0.0", 8080)
-    asyncio.ensure_future(ws_server)
-    logger.system("WebSocket server started on ws://0.0.0.0:8080")
-
-    app = start_http_server()
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8000)
-    await site.start()
-    logger.system("HTTP server started on http://0.0.0.0:8000")
-
-    await asyncio.Future()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-'''
