@@ -382,6 +382,72 @@ async def handle_broadcast(websocket, username, message_body):
     }
     await send_response(websocket, response)
 
+async def handle_chat_message(websocket, username, data):
+    """
+    Handle a 'chat' message sent by a user to multiple recipients.
+
+    Args:
+        websocket: The websocket of the sender.
+        username (str): The username of the sender.
+        data (dict): The data containing the chat message.
+    """
+    iv = data.get("iv")
+    symm_keys = data.get("symm_keys")
+    participants = data.get("participants")
+    encrypted_chat = data.get("chat")
+
+    if not iv or not symm_keys or not participants or not encrypted_chat:
+        logger.warning(f"Chat message from {username} missing fields.")
+        response = {
+            "type": "status",
+            "status": "error",
+            "message": "Missing fields in chat message.",
+        }
+        await send_response(websocket, response)
+        return
+
+    # Send the message to all participants except the sender
+    for idx, recipient in enumerate(participants):
+        if recipient == username:
+            continue  # Skip sending to self
+        if recipient not in online_users:
+            logger.warning(f"Chat message recipient {recipient} not online.")
+            continue
+        recipient_ws = online_users[recipient]
+        recipient_public_key = user_public_keys.get(recipient)
+        if not recipient_public_key:
+            logger.warning(f"No public key found for user {recipient}.")
+            continue
+
+        # For each recipient, we need to create a symm_keys list where only their key is included
+        # and the rest are placeholders (e.g., None or empty strings)
+        recipient_symm_keys = [''] * len(participants)
+        recipient_symm_keys[idx] = symm_keys[idx]  # Set the recipient's own symm_key
+
+        chat_message = {
+            "type": "chat",
+            "iv": iv,
+            "symm_keys": recipient_symm_keys,
+            "participants": participants,
+            "chat": encrypted_chat
+        }
+
+        try:
+            # Encrypt the message for the recipient
+            encrypted_payload = encrypt_message(json.dumps(chat_message), recipient_public_key)
+            await recipient_ws.send(encrypted_payload)
+            logger.debug(f"Chat message from {username} sent to {recipient}.")
+        except Exception as e:
+            logger.error(f"Failed to send chat message from {username} to {recipient}: {e}")
+            continue
+
+    # Optionally, send a confirmation back to the sender
+    response = {
+        "type": "status",
+        "status": "success",
+        "message": "Group message sent successfully."
+    }
+    await send_response(websocket, response)
 
 async def process_signed_data(websocket, data, username):
     msg_type = data.get("type")
@@ -392,6 +458,8 @@ async def process_signed_data(websocket, data, username):
         await handle_broadcast(websocket, username, data.get("body"))
     elif msg_type == "private_message":
         await handle_private_message(websocket, username, data)
+    elif msg_type == "chat":
+        await handle_chat_message(websocket, username, data)
     elif msg_type == "get_public_key":  # Added handling for get_public_key
         await handle_get_public_key(websocket, username, data)
     else:
