@@ -460,8 +460,10 @@ async def process_signed_data(websocket, data, username):
         await handle_private_message(websocket, username, data)
     elif msg_type == "chat":
         await handle_chat_message(websocket, username, data)
-    elif msg_type == "get_public_key":  # Added handling for get_public_key
+    elif msg_type == "get_public_key":
         await handle_get_public_key(websocket, username, data)
+    elif msg_type == "kick_user":
+        await handle_kick_user(websocket, username, data)
     else:
         logger.warning(f"Unhandled message type from {username}: {msg_type}")
 
@@ -590,6 +592,68 @@ async def handle_download(request):
 
     return web.FileResponse(file_path)
 
+async def handle_kick_user(websocket, username, data):
+    """
+    Handle a 'kick_user' command sent by an admin user to disconnect a target user.
+
+    Args:
+        websocket: The websocket of the sender.
+        username (str): The username of the sender.
+        data (dict): The data containing the kick command.
+    """
+    # Only allow the admin user to execute this command
+    if username != "admin":
+        logger.warning(f"User {username} attempted to use kick command without permission.")
+        response = {
+            "type": "status",
+            "status": "error",
+            "message": "You do not have permission to use this command."
+        }
+        await send_response(websocket, response)
+        return
+
+    target_username = data.get("target")
+    if not target_username:
+        logger.warning("Kick command missing target username.")
+        response = {
+            "type": "status",
+            "status": "error",
+            "message": "Missing target username."
+        }
+        await send_response(websocket, response)
+        return
+
+    # Check if the target user is online
+    target_websocket = online_users.get(target_username)
+    if not target_websocket:
+        logger.warning(f"Target user {target_username} not online.")
+        response = {
+            "type": "status",
+            "status": "error",
+            "message": f"User {target_username} not online."
+        }
+        await send_response(websocket, response)
+        return
+
+    # Forcefully disconnect the target user
+    try:
+        await target_websocket.close(code=4000, reason="You have been kicked by the admin.")
+    except Exception as e:
+        logger.error(f"Error closing websocket for user {target_username}: {e}")
+
+    # Remove user from online users
+    online_users.pop(target_username, None)
+    user_public_keys.pop(target_username, None)
+    last_counters.pop(target_username, None)
+    logger.info(f"User {target_username} has been kicked by admin.")
+
+    # Send success response to admin
+    response = {
+        "type": "status",
+        "status": "success",
+        "message": f"User {target_username} has been kicked."
+    }
+    await send_response(websocket, response)
 
 def start_http_server():
     app = web.Application()

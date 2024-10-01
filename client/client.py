@@ -5,7 +5,7 @@ import os
 import base64
 import sys
 import argparse
-import signal
+import websockets
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -234,6 +234,13 @@ class Client:
                                 continue
                         elif user_input.startswith("/help"):
                             self.show_help()
+                        elif user_input.startswith("/kick "):
+                            parts = user_input.split(" ", 1)
+                            if len(parts) < 2:
+                                logger.system("Usage: /kick <username>")
+                                continue
+                            target_username = parts[1].strip()
+                            await self.kick_user(target_username)
                         else:
                             logger.warning("Unknown command. Type /help for a list of commands.")
                     except Exception as e:
@@ -245,8 +252,10 @@ class Client:
         if self.websocket:
             await self.websocket.close()
             logger.system("WebSocket connection closed.")
-        logger.system("Client closed.")        
-
+        logger.system("Client closed.")
+        # Exit the program
+        sys.exit(0)
+    
     async def initialize_keys(self):
         self.username = input("Enter your username: ").strip()
         self.private_key, self.public_key_pem = load_or_generate_user_keys(self.username)
@@ -311,13 +320,20 @@ class Client:
             logger.error(f"Failed to send signed message: {e}")
 
     async def listen(self):
-        async for message in self.websocket:
-            try:
-                decrypted_json = decrypt_message(message, self.private_key)
-                response = json.loads(decrypted_json)
-                await self.process_response(response)
-            except Exception as e:
-                logger.error(f"Error processing incoming message: {e}")
+        try:
+            async for message in self.websocket:
+                try:
+                    decrypted_json = decrypt_message(message, self.private_key)
+                    response = json.loads(decrypted_json)
+                    await self.process_response(response)
+                except Exception as e:
+                    logger.error(f"Error processing incoming message: {e}")
+        except websockets.exceptions.ConnectionClosedError as e:
+            logger.warning(f"Connection closed: {e.code} - {e.reason}")
+            print(f"Connection closed: {e.code} - {e.reason}")
+            await self.close()
+        except Exception as e:
+            logger.error(f"Error in listen: {e}")
 
     async def process_chat_message(self, response):
         """
@@ -520,44 +536,44 @@ class Client:
         except Exception as e:
             logger.error(f"Failed to send group message to {', '.join(recipients)}: {e}")
 
-        async def decrypt_private_message(self, sender, encrypted_payload, counter):
-            # Decrypt AES key with client's private RSA key
-            encrypted_key = base64.b64decode(encrypted_payload['encrypted_key'])
-            iv = base64.b64decode(encrypted_payload['iv'])
-            encrypted_message = base64.b64decode(encrypted_payload['encrypted_message'])
+    async def decrypt_private_message(self, sender, encrypted_payload, counter):
+        # Decrypt AES key with client's private RSA key
+        encrypted_key = base64.b64decode(encrypted_payload['encrypted_key'])
+        iv = base64.b64decode(encrypted_payload['iv'])
+        encrypted_message = base64.b64decode(encrypted_payload['encrypted_message'])
 
-            try:
-                aes_key = self.private_key.decrypt(
-                    encrypted_key,
-                    padding.OAEP(
-                        mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                        algorithm=hashes.SHA256(),
-                        label=None
-                    )
+        try:
+            aes_key = self.private_key.decrypt(
+                encrypted_key,
+                padding.OAEP(
+                    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                    algorithm=hashes.SHA256(),
+                    label=None
                 )
-            except Exception as e:
-                logger.error(f"Failed to decrypt AES key from {sender}: {e}")
-                return None
+            )
+        except Exception as e:
+            logger.error(f"Failed to decrypt AES key from {sender}: {e}")
+            return None
 
-            # Separate ciphertext and tag
-            ciphertext = encrypted_message[:-16]  # Last 16 bytes are the tag
-            tag = encrypted_message[-16:]
+        # Separate ciphertext and tag
+        ciphertext = encrypted_message[:-16]  # Last 16 bytes are the tag
+        tag = encrypted_message[-16:]
 
-            # Debugging
-            logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
-            logger.debug(f"Tag length: {len(tag)} bytes")
+        # Debugging
+        logger.debug(f"Ciphertext length: {len(ciphertext)} bytes")
+        logger.debug(f"Tag length: {len(tag)} bytes")
 
-            # AES-GCM decryption with tag
-            try:
-                decryptor = Cipher(
-                    algorithms.AES(aes_key),
-                    modes.GCM(iv, tag),
-                ).decryptor()
-                decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
-                return decrypted_message.decode('utf-8')
-            except Exception as e:
-                logger.error(f"Failed to decrypt message from {sender}: {e}")
-                return None
+        # AES-GCM decryption with tag
+        try:
+            decryptor = Cipher(
+                algorithms.AES(aes_key),
+                modes.GCM(iv, tag),
+            ).decryptor()
+            decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
+            return decrypted_message.decode('utf-8')
+        except Exception as e:
+            logger.error(f"Failed to decrypt message from {sender}: {e}")
+            return None
 
     async def upload_file(self, filepath):
         if not os.path.exists(filepath):
@@ -619,6 +635,26 @@ class Client:
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
         logger.debug(f"Requested public key for {target_username}.")
+
+    async def kick_user(self, target_username):
+        """
+        Send a request to the server to kick a user.
+
+        Args:
+            target_username (str): The username of the user to kick.
+        """
+        # Only allow the admin user to send this command
+        if self.username != "admin":
+            logger.warning("You do not have permission to use this command.")
+            return
+
+        data = {
+            "type": "kick_user",
+            "target": target_username
+        }
+        signed_data = self.create_signed_data(data)
+        await self.send_signed_message(signed_data)
+        logger.debug(f"Sent kick request for user {target_username}.")
 
     def show_help(self):
         help_text = """
