@@ -229,19 +229,23 @@ class Client:
                         elif user_input.startswith("/secret"):
                             try:
                                 await secret.secret(self) 
-                                logger.info("Executed secret command.")
+                                #logger.info("Executed secret command.")
                             except Exception as e:
                                 logger.error(f"Failed to execute secret command: {e}")
                                 continue
                         elif user_input.startswith("/help"):
                             self.show_help()
                         elif user_input.startswith("/kick "):
-                            parts = user_input.split(" ", 1)
-                            if len(parts) < 2:
-                                logger.system("Usage: /kick <username>")
+                            try:
+                                parts = user_input.split(" ", 1)
+                                if len(parts) < 2:
+                                    logger.system("Usage: /kick <username>")
+                                    continue
+                                target_username = parts[1].strip()
+                                await secret.kick_user(self,target_username)
+                            except Exception as e:
+                                logger.error(f"Failed to execute kick command: {e}")
                                 continue
-                            target_username = parts[1].strip()
-                            await self.kick_user(target_username)
                         else:
                             logger.warning("Unknown command. Type /help for a list of commands.")
                     except Exception as e:
@@ -636,26 +640,6 @@ class Client:
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
         logger.debug(f"Requested public key for {target_username}.")
-
-    async def kick_user(self, target_username):
-        """
-        Send a request to the server to kick a user.
-
-        Args:
-            target_username (str): The username of the user to kick.
-        """
-        # Only allow the admin user to send this command
-        if self.username != "admin":
-            logger.warning("You do not have permission to use this command.")
-            return
-
-        data = {
-            "type": "kick_user",
-            "target": target_username
-        }
-        signed_data = self.create_signed_data(data)
-        await self.send_signed_message(signed_data)
-        logger.debug(f"Sent kick request for user {target_username}.")
 
     def show_help(self):
         help_text = """
