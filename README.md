@@ -23,7 +23,7 @@ Clients can only connect to their home server and communicate with users on the 
     - [Install Dependencies](#install-dependencies)
   - [Usage](#usage)
     - [Starting the Server](#starting-the-server)
-    - [Starting the Client](#starting-the-client)
+    - [Starting the Clients](#starting-the-clients)
     - [Client-Server Communication](#client-server-communication)
     - [Network Topology Examples](#network-topology-examples)
       - [Simple Neighborhood](#simple-neighborhood)
@@ -65,19 +65,24 @@ Ensure you have the following installed:
 
 ### Starting the Server
 
-Run the server using the following command:
+Run the servers using the following command:
 
 ```bash
-./scripts/run_server.sh
+python -m server.server --host 0.0.0.0 --port 8000 --neighbors ws://127.0.0.1:8001
+```
+```bash
+python -m server.server --host 0.0.0.0 --port 8001 --neighbors ws://127.0.0.1:8000
 ```
 
 By default, the WebSocket server will start on `ws://0.0.0.0:8080`, and the HTTP server for file handling will run on `http://0.0.0.0:8000`.
 
-### Starting the Client
+### Starting the Clients
 
 ```bash
-cd client
-python client.py ws://localhost:8080 http://localhost:8000
+python -m client.client  --host 127.0.0.1 --port 8000
+```
+```bash
+python -m client.client  --host 127.0.0.1 --port 8001
 ```
 
 ### Client-Server Communication
