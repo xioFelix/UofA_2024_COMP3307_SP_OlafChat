@@ -1,5 +1,13 @@
 # OLAF/Neighbourhood Protocol v1.1.1 Chat Server
 
+### By Group 6:
+- Zhihan Yang (a1791800)
+- 
+- 
+- 
+
+## Introduction
+
 This project implements a decentralized, encrypted chat server using the OLAF/Neighbourhood Protocol. The server uses RSA for key exchange, AES-GCM for secure communication, and WebSockets for real-time communication. This implementation allows clients to send messages through their home server, and messages can travel between interconnected servers within a neighborhood. 
 
 Clients can only connect to their home server and communicate with users on the same server or on servers directly connected to their home server.
@@ -74,7 +82,9 @@ python -m server.server --host 0.0.0.0 --port 8000 --neighbors ws://127.0.0.1:80
 python -m server.server --host 0.0.0.0 --port 8001 --neighbors ws://127.0.0.1:8000
 ```
 
-By default, the WebSocket server will start on `ws://0.0.0.0:8080`, and the HTTP server for file handling will run on `http://0.0.0.0:8000`.
+**Please note:** When starting the server, you only need to specify the web socket port manually. The http port will be automatically increased by 100 based on the web port. For example, if you start the server on port <u>8000</u>, the web socket port is <u>8000</u> and the http port is <u>8100</u>.
+
+To simplify the startup method, all startup parameters are **optional**. By default, the WebSocket server will start on `ws://0.0.0.0:8000`, and the HTTP server for file handling will run on `http://0.0.0.0:8100`.
 
 ### Starting the Clients
 
@@ -212,7 +222,12 @@ Messages include a counter that prevents replay attacks by ensuring that each me
 
 ## Logging
 
-By default, the server outputs `INFO` level logs to the console, including connections, disconnections, and message flow. For more detailed logs, you can enable `DEBUG` level logging:
+The logging system uses the following levels:
+- **`Trace`:** The lowest level of logging. When enabled, it will display all debug statements, but may contain a lot of information that is not of interest.
+- **`Debug`:** Debug mode, which usually outputs some of the functions that we are most concerned about at the moment as needed.
+- **`Info`:** The mode seen by the user, only necessary information is output, and no debug statements will appear.
+
+By default, the server outputs `INFO` level logs to the console, including connections, disconnections, and message flow. For more detailed logs, you can enable `DEBUG` or `TRACE` level logging:
 
 ```python
 import logging

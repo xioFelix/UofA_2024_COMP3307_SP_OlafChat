@@ -429,7 +429,7 @@ async def forward_request_to_server(data, server_address):
             neighbor_connections[server_address] = neighbor_ws
             asyncio.create_task(server_handler(neighbor_ws, '/server'))
         except Exception as e:
-            logger.error(f"Failed to connect to target server at {target_server_ws_uri}: {e}")
+            logger.warning(f"Failed to connect to target server at {target_server_ws_uri}: {e}")
             return
     else:
         neighbor_ws = neighbor_connections[server_address]
@@ -542,7 +542,7 @@ async def connect_to_neighbor(address, host, port):
 
             break  # Exit the loop once connected
         except Exception as e:
-            logger.error(f"Failed to connect to neighbor server at {address}: {e}")
+            logger.warning(f"Failed to connect to neighbor server at {address}: {e}")
             logger.info(f"Retrying connection to {address} in 5 seconds...")
             await asyncio.sleep(5)
 
