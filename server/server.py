@@ -4,7 +4,7 @@ import json
 import os
 import base64
 import argparse
-import signal
+import websockets
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -16,14 +16,18 @@ logger = ui.init_logger('server')   # Initialize logger
 ui.set_log_level(logger, 'DEBUG')   # SET LOG LEVEL AT HERE
 
 # Global state
-online_users = {}  # username -> websocket
-user_public_keys = {}  # username -> public_key (RSA public key object)
-last_counters = {}  # username -> last received counter
+online_users = {}     # username -> websocket
+user_public_keys = {} # username -> public_key (RSA public key object)
+last_counters = {}    # username -> last received counter
+neighbor_connections = {}  # address -> websocket
+global_user_map = {}       # username -> server_address
+
+self_host = ''  # Server's own host address
+self_port = 0   # Server's own port
 
 # File storage directory
 FILE_STORAGE_DIR = "server_files"
 os.makedirs(FILE_STORAGE_DIR, exist_ok=True)
-
 
 # Load or generate server's RSA key pair
 def load_or_generate_server_keys():
@@ -56,7 +60,6 @@ server_public_key_pem = (
     )
     .decode("utf-8")
 )
-
 
 # Utility functions
 def sign_message(private_key, message):
@@ -160,6 +163,274 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
         raise
 
 
+async def connect_to_neighbors(neighbor_addresses, host, port):
+    for address in neighbor_addresses:
+        asyncio.create_task(connect_to_neighbor(address, host, port))
+
+
+
+async def server_handler(websocket, path):
+    """
+    Handle incoming messages from neighbor servers.
+
+    This function processes messages received from neighbor servers, such as 'server_hello',
+    'client_update', 'forward_request', and 'forward_response'.
+    """
+    async for message in websocket:
+        try:
+            data = json.loads(message)
+            msg_type = data.get("type")
+
+            if msg_type == "server_hello":
+                # Handle server_hello message
+                logger.info(f"Received server_hello from {data.get('sender')}")
+                # Optionally send back client_update
+                await send_client_update(websocket)
+            elif msg_type == "client_update":
+                # Update online_users based on received data
+                username = data.get("username")
+                public_key_pem = data.get("public_key")
+                server_address = data.get("server_address")
+                if username and public_key_pem and server_address:
+                    # Update user_public_keys and global_user_map
+                    user_public_keys[username] = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+                    global_user_map[username] = server_address
+                    logger.info(f"Updated user {username} info from neighbor server.")
+                else:
+                    logger.warning(f"Received malformed client_update from neighbor server: {data}")
+            elif msg_type == "client_update_request":
+                # Send client_update to the requesting server
+                await send_client_update(websocket)
+            elif msg_type == "message_forward":
+                # Handle forwarded messages
+                forwarded_data = data.get("data")
+                # Process the forwarded message as if it was received from a local client
+                await process_signed_data(None, forwarded_data, forwarded_data.get("from"))
+            elif msg_type == "forward_request":
+                # Handle forwarded request
+                original_sender = data.get("original_sender")
+                forwarded_data = data.get("data")
+                request_type = forwarded_data.get("type")
+                if request_type == "get_public_key":
+                    target_username = forwarded_data.get("username")
+                    if target_username in user_public_keys:
+                        public_key_pem = (
+                            user_public_keys[target_username]
+                            .public_bytes(
+                                encoding=serialization.Encoding.PEM,
+                                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+                            )
+                            .decode("utf-8")
+                        )
+                        response_data = {
+                            "type": "public_key",
+                            "username": target_username,
+                            "public_key": public_key_pem,
+                        }
+                        # Send back the response to the original sender server
+                        response = {
+                            "type": "forward_response",
+                            "original_request": forwarded_data,
+                            "data": response_data
+                        }
+                        await send_response_to_server(response, original_sender)
+                        logger.debug(f"Processed forwarded request for {target_username}, sent response to {original_sender}")
+                    else:
+                        # User not found
+                        response_data = {
+                            "type": "error",
+                            "message": f"Public key for {target_username} not found.",
+                        }
+                        response = {
+                            "type": "forward_response",
+                            "original_request": forwarded_data,
+                            "data": response_data
+                        }
+                        await send_response_to_server(response, original_sender)
+                        logger.debug(f"User {target_username} not found, sent error response to {original_sender}")
+            elif msg_type == "forward_response":
+                # Handle forwarded response
+                original_request = data.get("original_request")
+                response_data = data.get("data")
+                requesting_username = original_request.get("requesting_username")
+                # Find the websocket of the requesting client
+                client_ws = online_users.get(requesting_username)
+                if client_ws:
+                    await send_response(client_ws, response_data)
+                    logger.debug(f"Forwarded response to {requesting_username}: {response_data}")
+                else:
+                    logger.warning(f"Requesting client {requesting_username} not found.")
+            elif msg_type == "client_removal":
+                username = data.get("username")
+                if username and username in global_user_map:
+                    del global_user_map[username]
+                    logger.info(f"Removed user {username} from global_user_map.")
+            elif msg_type == "message_forward":
+                # Handle forwarded messages
+                forwarded_data = data.get("data")
+                sender_username = forwarded_data.get("from")
+                # Process the message as if it was received from a local client
+                await process_signed_data(None, forwarded_data, sender_username)
+            else:
+                logger.warning(f"Unhandled message type from neighbor server: {msg_type}")
+        except Exception as e:
+            logger.error(f"Error processing message from neighbor server: {e}")
+
+async def forward_request_to_server(data, server_address):
+    """
+    Forwards a request to another server.
+
+    This function ensures a connection to the target server and sends the given request.
+    """
+    # Ensure we have a connection to the target server
+    if server_address not in neighbor_connections:
+        # Establish connection
+        target_server_ws_uri = f"ws://{server_address}/server"
+        try:
+            neighbor_ws = await websockets.connect(target_server_ws_uri)
+            neighbor_connections[server_address] = neighbor_ws
+            asyncio.create_task(server_handler(neighbor_ws, '/server'))
+        except Exception as e:
+            logger.error(f"Failed to connect to target server at {target_server_ws_uri}: {e}")
+            return
+    else:
+        neighbor_ws = neighbor_connections[server_address]
+
+    # Send the request
+    forward_data = {
+        "type": "forward_request",
+        "original_sender": f"{self_host}:{self_port}",
+        "data": data
+    }
+    await neighbor_ws.send(json.dumps(forward_data))
+    logger.debug(f"Forwarded request {data['type']} for {data.get('username')} to {server_address}")
+
+async def send_response_to_server(response, server_address):
+    """
+    Sends a response message to the specified server.
+
+    This function ensures a connection to the target server and sends the given response message.
+    """
+    # Ensure we have a connection to the target server
+    if server_address not in neighbor_connections:
+        # Establish connection
+        target_server_ws_uri = f"ws://{server_address}/server"
+        try:
+            neighbor_ws = await websockets.connect(target_server_ws_uri)
+            neighbor_connections[server_address] = neighbor_ws
+            asyncio.create_task(server_handler(neighbor_ws, '/server'))
+        except Exception as e:
+            logger.error(f"Failed to connect to target server at {target_server_ws_uri}: {e}")
+            return
+    else:
+        neighbor_ws = neighbor_connections[server_address]
+
+    # Send the response
+    await neighbor_ws.send(json.dumps(response))
+    logger.debug(f"Sent response to server {server_address}: {response}")
+
+async def handle_get_public_key(websocket, username, data):
+    """
+    Handle a 'get_public_key' request from a client.
+
+    If the requested user's public key is available locally, send it to the client.
+    If the user is on another server, forward the request to the appropriate server.
+    """
+    target_username = data.get("username")
+    requesting_username = data.get("requesting_username") or username  # Use provided requesting_username or current username
+
+    if target_username in user_public_keys:
+        public_key_pem = (
+            user_public_keys[target_username]
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode("utf-8")
+        )
+
+        response = {
+            "type": "public_key",
+            "username": target_username,
+            "public_key": public_key_pem,
+        }
+        await send_response(websocket, response)
+        logger.info(f"Sent public key for {target_username}")
+    elif target_username in global_user_map:
+        # User is on another server, forward the request
+        target_server_address = global_user_map[target_username]
+        data['requesting_username'] = requesting_username  # Ensure requesting_username is set
+        await forward_request_to_server(data, target_server_address)
+    else:
+        # User not found
+        logger.warning(f"Public key for user '{target_username}' not found.")
+        response = {
+            "type": "error",
+            "message": f"Public key for {target_username} not found.",
+        }
+        await send_response(websocket, response)
+
+async def server_ws_handler(websocket, path):
+    """
+    Handle incoming connections from neighbor servers.
+    """
+    logger.info(f"Neighbor server connected from {websocket.remote_address}")
+    try:
+        await server_handler(websocket, path)
+    except Exception as e:
+        logger.error(f"Connection error with neighbor server {websocket.remote_address}: {e}")
+
+async def connect_to_neighbor(address, host, port):
+    while True:
+        try:
+            # Ensure the address includes the /server path
+            if not address.endswith('/server'):
+                address = address.rstrip('/') + '/server'
+
+            websocket = await websockets.connect(address)
+            neighbor_connections[address] = websocket
+            logger.info(f"Connected to neighbor server at {address}")
+
+            # Send server_hello message
+            data = {
+                "type": "server_hello",
+                "sender": f"{host}:{port}"
+            }
+            await websocket.send(json.dumps(data))
+            logger.debug(f"Sent server_hello to {address}")
+
+            # Start listening to the neighbor server
+            asyncio.create_task(server_handler(websocket, '/server'))
+
+            break  # Exit the loop once connected
+        except Exception as e:
+            logger.error(f"Failed to connect to neighbor server at {address}: {e}")
+            logger.info(f"Retrying connection to {address} in 5 seconds...")
+            await asyncio.sleep(5)
+
+async def send_client_update(websocket):
+    """
+    Sends individual client updates to a neighbor server.
+
+    This function iterates over all online users and sends their information
+    as separate 'client_update' messages to the neighbor server.
+    """
+    for username, public_key in user_public_keys.items():
+        # Only include users connected to this server
+        if online_users.get(username) is not None:
+            public_key_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode('utf-8')
+            data = {
+                "type": "client_update",
+                "username": username,
+                "public_key": public_key_pem,
+                "server_address": f"{self_host}:{self_port}"
+            }
+            await websocket.send(json.dumps(data))
+            logger.debug(f"Sent client_update for {username} to neighbor server.")
+
 async def handler(websocket, path):
     try:
         await websocket.send(server_public_key_pem)
@@ -239,10 +510,28 @@ async def handler(websocket, path):
             del online_users[username]
             del user_public_keys[username]
             del last_counters[username]
+            if username in global_user_map:
+                del global_user_map[username]
             logger.info(
                 f"User {username} disconnected. Online users: {set(online_users.keys())}"
             )
+            # Broadcast client removal
+            await broadcast_client_removal(username)
 
+async def broadcast_client_removal(username):
+    """
+    Broadcasts a client removal to all neighbor servers.
+
+    This function informs neighbor servers that a user has disconnected.
+    """
+    data = {
+        "type": "client_removal",
+        "username": username,
+        "server_address": f"{self_host}:{self_port}"
+    }
+    for neighbor_ws in neighbor_connections.values():
+        await neighbor_ws.send(json.dumps(data))
+        logger.debug(f"Broadcasted client_removal for {username} to neighbor server.")
 
 def get_username_by_websocket(websocket):
     for user, ws in online_users.items():
@@ -250,8 +539,14 @@ def get_username_by_websocket(websocket):
             return user
     return None
 
-
 async def process_signed_data_initial(websocket, data, counter, signature):
+    """
+    Process initial signed data from an unauthenticated user.
+
+    This function handles 'hello' and 'login' messages from users who are not yet authenticated.
+    It loads the user's public key, stores it, and updates the online users list.
+    For 'login' messages, it also updates the global user map and notifies neighbor servers.
+    """
     msg_type = data.get("type")
     username = data.get("username")
     public_key_pem = data.get("public_key")
@@ -306,6 +601,11 @@ async def process_signed_data_initial(websocket, data, counter, signature):
             f"User {username} logged in successfully. Online users: {set(online_users.keys())}"
         )
 
+        # Update global_user_map with user's server address
+        global_user_map[username] = f"{self_host}:{self_port}"
+        # Notify neighbor servers about the new user
+        await broadcast_client_update(username, public_key_pem)
+
         response = {
             "type": "status",
             "status": "success",
@@ -313,6 +613,22 @@ async def process_signed_data_initial(websocket, data, counter, signature):
         }
         await send_response(websocket, response)
 
+async def broadcast_client_update(username, public_key_pem):
+    """
+    Broadcasts a client update to all neighbor servers.
+
+    This function sends a 'client_update' message to all connected neighbor servers,
+    informing them about a new user who has logged in, along with their public key and server address.
+    """
+    data = {
+        "type": "client_update",
+        "username": username,
+        "public_key": public_key_pem,
+        "server_address": f"{self_host}:{self_port}"
+    }
+    for neighbor_ws in neighbor_connections.values():
+        await neighbor_ws.send(json.dumps(data))
+        logger.debug(f"Broadcasted client_update for {username} to neighbor server.")
 
 # Added function to handle get_public_key
 async def handle_get_public_key(websocket, username, data):
@@ -410,35 +726,45 @@ async def handle_chat_message(websocket, username, data):
     for idx, recipient in enumerate(participants):
         if recipient == username:
             continue  # Skip sending to self
-        if recipient not in online_users:
-            logger.warning(f"Chat message recipient {recipient} not online.")
-            continue
-        recipient_ws = online_users[recipient]
-        recipient_public_key = user_public_keys.get(recipient)
-        if not recipient_public_key:
-            logger.warning(f"No public key found for user {recipient}.")
-            continue
 
-        # For each recipient, we need to create a symm_keys list where only their key is included
-        # and the rest are placeholders (e.g., None or empty strings)
-        recipient_symm_keys = [''] * len(participants)
-        recipient_symm_keys[idx] = symm_keys[idx]  # Set the recipient's own symm_key
+        # Check if recipient is connected to this server
+        if recipient in online_users:
+            recipient_ws = online_users[recipient]
+            recipient_public_key = user_public_keys.get(recipient)
+            if not recipient_public_key:
+                logger.warning(f"No public key found for user {recipient}.")
+                continue
 
-        chat_message = {
-            "type": "chat",
-            "iv": iv,
-            "symm_keys": recipient_symm_keys,
-            "participants": participants,
-            "chat": encrypted_chat
-        }
+            # Prepare the message for the recipient
+            recipient_symm_keys = [''] * len(participants)
+            recipient_symm_keys[idx] = symm_keys[idx]  # Set the recipient's own symm_key
 
-        try:
-            # Encrypt the message for the recipient
-            encrypted_payload = encrypt_message(json.dumps(chat_message), recipient_public_key)
-            await recipient_ws.send(encrypted_payload)
-            logger.debug(f"Chat message from {username} sent to {recipient}.")
-        except Exception as e:
-            logger.error(f"Failed to send chat message from {username} to {recipient}: {e}")
+            chat_message = {
+                "type": "chat",
+                "iv": iv,
+                "symm_keys": recipient_symm_keys,
+                "participants": participants,
+                "chat": encrypted_chat
+            }
+
+            try:
+                # Encrypt the message for the recipient
+                encrypted_payload = encrypt_message(json.dumps(chat_message), recipient_public_key)
+                await recipient_ws.send(encrypted_payload)
+                logger.debug(f"Chat message from {username} sent to {recipient}.")
+            except Exception as e:
+                logger.error(f"Failed to send chat message from {username} to {recipient}: {e}")
+                continue
+
+        elif recipient in global_user_map:
+            # Recipient is connected to another server, forward the message
+            target_server_address = global_user_map[recipient]
+            # Add sender's username to data for forwarding
+            data['from'] = username
+            await forward_message_to_server(data, target_server_address)
+            logger.info(f"Forwarded chat message from {username} to {recipient} via server {target_server_address}.")
+        else:
+            logger.warning(f"Chat message recipient {recipient} not found.")
             continue
 
     # Optionally, send a confirmation back to the sender
@@ -448,6 +774,37 @@ async def handle_chat_message(websocket, username, data):
         "message": "Group message sent successfully."
     }
     await send_response(websocket, response)
+
+async def forward_message_to_server(data, server_address):
+    """
+    Forwards a message to another server.
+
+    Args:
+        data (dict): The message data to forward.
+        server_address (str): The address of the target server.
+    """
+    # Ensure we have a connection to the target server
+    if server_address not in neighbor_connections:
+        # Establish connection
+        target_server_ws_uri = f"ws://{server_address}/server"
+        try:
+            neighbor_ws = await websockets.connect(target_server_ws_uri)
+            neighbor_connections[server_address] = neighbor_ws
+            asyncio.create_task(server_handler(neighbor_ws, '/server'))
+        except Exception as e:
+            logger.error(f"Failed to connect to target server at {target_server_ws_uri}: {e}")
+            return
+    else:
+        neighbor_ws = neighbor_connections[server_address]
+
+    # Send the message
+    forward_data = {
+        "type": "message_forward",
+        "original_sender": f"{self_host}:{self_port}",
+        "data": data
+    }
+    await neighbor_ws.send(json.dumps(forward_data))
+    logger.debug(f"Forwarded message {data['type']} to {server_address}")
 
 async def process_signed_data(websocket, data, username):
     msg_type = data.get("type")
@@ -467,13 +824,18 @@ async def process_signed_data(websocket, data, username):
     else:
         logger.warning(f"Unhandled message type from {username}: {msg_type}")
 
-
 async def handle_list_users(websocket, username):
-    users = list(online_users.keys())
-    response = {"type": "client_list", "servers": users}
+    """
+    Sends a list of all online users across the network to the requesting client.
+
+    This function combines local online users and users from the global user map
+    to provide a comprehensive list.
+    """
+    # Combine local and global users
+    all_users = set(online_users.keys()).union(set(global_user_map.keys()))
+    response = {"type": "client_list", "servers": list(all_users)}
     await send_response(websocket, response)
     logger.debug(f"Sent client list to {username}.")
-
 
 async def handle_private_message(websocket, username, data):
     recipient = data.get("to")
@@ -490,55 +852,79 @@ async def handle_private_message(websocket, username, data):
         await send_response(websocket, response)
         return
 
-    if recipient not in online_users:
-        logger.warning(f"Private message recipient {recipient} not online.")
+    if recipient in online_users:
+        # Recipient is online on this server
+        recipient_ws = online_users[recipient]
+        recipient_public_key = user_public_keys.get(recipient)
+
+        if not recipient_public_key:
+            logger.warning(f"No public key found for user {recipient}.")
+            response = {
+                "type": "status",
+                "status": "error",
+                "message": f"No public key found for user {recipient}.",
+            }
+            await send_response(websocket, response)
+            return
+
+        private_message = {
+            "type": "private_message",
+            "from": username,
+            "message": message_body,
+            "counter": counter,
+        }
+
+        try:
+            encrypted_payload_for_recipient = encrypt_message(
+                json.dumps(private_message), recipient_public_key
+            )
+            await recipient_ws.send(encrypted_payload_for_recipient)
+            logger.debug(f"Private message from {username} sent to {recipient}.")
+        except Exception as e:
+            logger.error(
+                f"Failed to send private message from {username} to {recipient}: {e}"
+            )
+            response = {
+                "type": "status",
+                "status": "error",
+                "message": f"Failed to send message to {recipient}.",
+            }
+            await send_response(websocket, response)
+    elif recipient in global_user_map:
+        # Recipient is on another server, forward the message
+        target_server_address = global_user_map[recipient]
+        data['from'] = username
+        await forward_request_to_server(data, target_server_address)
+        logger.info(f"Forwarded private message from {username} to {recipient} via server {target_server_address}.")
+        response = {
+            "type": "status",
+            "status": "success",
+            "message": f"Message forwarded to {recipient} via server {target_server_address}."
+        }
+        await send_response(websocket, response)
+    else:
+        logger.warning(f"Private message recipient {recipient} not found.")
         response = {
             "type": "status",
             "status": "error",
-            "message": f"User {recipient} not online.",
-        }
-        await send_response(websocket, response)
-        return
-
-    recipient_ws = online_users[recipient]
-    recipient_public_key = user_public_keys.get(recipient)
-
-    if not recipient_public_key:
-        logger.warning(f"No public key found for user {recipient}.")
-        response = {
-            "type": "status",
-            "status": "error",
-            "message": f"No public key found for user {recipient}.",
-        }
-        await send_response(websocket, response)
-        return
-
-    private_message = {
-        "type": "private_message",
-        "from": username,
-        "message": message_body,
-        "counter": counter,
-    }
-
-    try:
-        encrypted_payload_for_recipient = encrypt_message(
-            json.dumps(private_message), recipient_public_key
-        )
-        await recipient_ws.send(encrypted_payload_for_recipient)
-        logger.debug(f"Private message from {username} sent to {recipient}.")
-    except Exception as e:
-        logger.error(
-            f"Failed to send private message from {username} to {recipient}: {e}"
-        )
-        response = {
-            "type": "status",
-            "status": "error",
-            "message": f"Failed to send message to {recipient}.",
+            "message": f"User {recipient} not found.",
         }
         await send_response(websocket, response)
 
+async def forward_message_to_neighbors(data):
+    for websocket in neighbor_connections.values():
+        forward_data = {
+            "type": "message_forward",
+            "data": data
+        }
+        await websocket.send(json.dumps(forward_data))
+        logger.debug("Forwarded message to neighbor server.")
 
 async def send_response(websocket, response):
+    if websocket is None:
+    # Cannot send response without a websocket
+        return
+
     username = get_username_by_websocket(websocket)
     if not username:
         logger.warning("Attempted to send response to unidentified websocket.")
@@ -661,24 +1047,41 @@ def start_http_server():
     app.router.add_get("/files/{filename}", handle_download)
     return app
 
-async def start(port=8000, host='0.0.0.0'):
-    # Automatically assign HTTP port as WebSocket port + 100
-    http_port = port + 100
+async def start(port=8000, host='0.0.0.0', neighbor_addresses=None):
+    global self_host, self_port
+    # Set self_host to '127.0.0.1' if host is '0.0.0.0', else use the specified host
+    if host == '0.0.0.0':
+        self_host = '127.0.0.1'
+    else:
+        self_host = host
+    self_port = port
 
-    # Start WebSocket server
-    ws_server = serve(handler, host, port)
-    asyncio.ensure_future(ws_server)
-    logger.system(f"WebSocket server started on ws://{host}:{port}")
-
-    # Start HTTP server
+    # Start the HTTP server before starting the WebSocket server
     app = start_http_server()
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, host, http_port)
+    site = web.TCPSite(runner, host, port + 100)
     await site.start()
-    logger.system(f"HTTP server started on http://{host}:{http_port}")
+    logger.system(f"HTTP server started on http://{host}:{port + 100}")
 
-    await asyncio.Future()  # Keeps the server running
+    # Start the WebSocket server using 'async with'
+    async def main_handler(websocket, path):
+        if path == '/client':
+            await handler(websocket, path)
+        elif path == '/server':
+            await server_handler(websocket, path)
+        else:
+            logger.warning(f"Unknown path {path}, rejecting connection.")
+            await websocket.close(code=1000, reason='Unknown path')
+
+    async with serve(main_handler, host, port):
+        logger.system(f"WebSocket server started on ws://{host}:{port}")
+
+        # Connect to neighbor servers
+        if neighbor_addresses:
+            asyncio.create_task(connect_to_neighbors(neighbor_addresses, host, port))
+
+        await asyncio.Future()  # Keep the server running
 
 async def close():
     # Add code to properly close WebSocket and HTTP server, and cleanup if necessary
@@ -692,12 +1095,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start the WebSocket and HTTP server.")
     parser.add_argument("-p", "--port", type=int, default=8000, help="WebSocket server port (default: 8000)")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the servers (default: 0.0.0.0)")
+    parser.add_argument("--neighbors", type=str, nargs='*', help="List of neighbor server addresses (e.g., ws://localhost:8001)")
 
     args = parser.parse_args()
 
     # Use the arguments to start
     try:
-        asyncio.run(start(port=args.port, host=args.host))
+        asyncio.run(start(port=args.port, host=args.host, neighbor_addresses=args.neighbors))
     except KeyboardInterrupt:
         asyncio.run(close())
         logger.trace("Server closed.")

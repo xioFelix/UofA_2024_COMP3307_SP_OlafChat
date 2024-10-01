@@ -170,7 +170,8 @@ class Client:
     async def start(self):
         try:
             await self.initialize_keys()
-            async with connect(self.server_ws_uri) as websocket:
+            ws_uri_with_path = f"{self.server_ws_uri}/client"
+            async with connect(ws_uri_with_path) as websocket:
                 self.websocket = websocket
                 await self.receive_server_public_key()
 
@@ -627,10 +628,10 @@ class Client:
                 print(f"Exception during file download: {e}")
 
     async def get_public_key(self, target_username):
-        # Request server to send public key of target_username
         data = {
             "type": "get_public_key",
-            "username": target_username
+            "username": target_username,
+            "requesting_username": self.username  # Include your own username
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
