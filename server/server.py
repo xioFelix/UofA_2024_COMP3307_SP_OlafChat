@@ -5,6 +5,7 @@ import os
 import base64
 import argparse
 import websockets
+import uuid
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
@@ -21,6 +22,7 @@ user_public_keys = {} # username -> public_key (RSA public key object)
 last_counters = {}    # username -> last received counter
 neighbor_connections = {}  # address -> websocket
 global_user_map = {}       # username -> server_address
+processed_message_ids = set()
 
 self_host = ''  # Server's own host address
 self_port = 0   # Server's own port
@@ -167,25 +169,57 @@ async def connect_to_neighbors(neighbor_addresses, host, port):
     for address in neighbor_addresses:
         asyncio.create_task(connect_to_neighbor(address, host, port))
 
-
-
 async def server_handler(websocket, path):
     """
     Handle incoming messages from neighbor servers.
 
-    This function processes messages received from neighbor servers, such as 'server_hello',
-    'client_update', 'forward_request', and 'forward_response'.
+    This function processes messages received from neighbor servers, such as 'message_forward' and other control messages.
     """
     async for message in websocket:
         try:
             data = json.loads(message)
             msg_type = data.get("type")
 
-            if msg_type == "server_hello":
+            if msg_type == "message_forward":
+                # Handle forwarded messages
+                message_type = data.get("message_type")
+                forwarded_data = data.get("data")
+                original_sender = data.get("original_sender")
+
+                # Process the message based on its type
+                if message_type == "private_message":
+                    await process_private_message_forward(forwarded_data)
+                elif message_type == "chat":
+                    await process_chat_message_forward(forwarded_data)
+                elif message_type == "get_public_key":
+                    await process_get_public_key_forward(forwarded_data, original_sender)
+                elif message_type == "broadcast":
+                    await process_broadcast_forward(forwarded_data)
+                elif message_type == "forward_response":
+                    await process_forward_response(forwarded_data)
+                else:
+                    logger.warning(f"Unhandled forwarded message type: {message_type}")
+
+            elif msg_type == "forward_response":
+                # Handle forwarded responses for get_public_key requests
+                original_request = data.get("original_request")
+                response_data = data.get("data")
+                requesting_username = original_request.get("requesting_username")
+
+                # Find the websocket of the requesting client
+                client_ws = online_users.get(requesting_username)
+                if client_ws:
+                    await send_response(client_ws, response_data)
+                    logger.debug(f"Forwarded response to {requesting_username}: {response_data}")
+                else:
+                    logger.warning(f"Requesting client {requesting_username} not found.")
+
+            elif msg_type == "server_hello":
                 # Handle server_hello message
                 logger.info(f"Received server_hello from {data.get('sender')}")
                 # Optionally send back client_update
                 await send_client_update(websocket)
+
             elif msg_type == "client_update":
                 # Update online_users based on received data
                 username = data.get("username")
@@ -198,83 +232,187 @@ async def server_handler(websocket, path):
                     logger.info(f"Updated user {username} info from neighbor server.")
                 else:
                     logger.warning(f"Received malformed client_update from neighbor server: {data}")
-            elif msg_type == "client_update_request":
-                # Send client_update to the requesting server
-                await send_client_update(websocket)
-            elif msg_type == "message_forward":
-                # Handle forwarded messages
-                forwarded_data = data.get("data")
-                # Process the forwarded message as if it was received from a local client
-                await process_signed_data(None, forwarded_data, forwarded_data.get("from"))
-            elif msg_type == "forward_request":
-                # Handle forwarded request
-                original_sender = data.get("original_sender")
-                forwarded_data = data.get("data")
-                request_type = forwarded_data.get("type")
-                if request_type == "get_public_key":
-                    target_username = forwarded_data.get("username")
-                    if target_username in user_public_keys:
-                        public_key_pem = (
-                            user_public_keys[target_username]
-                            .public_bytes(
-                                encoding=serialization.Encoding.PEM,
-                                format=serialization.PublicFormat.SubjectPublicKeyInfo,
-                            )
-                            .decode("utf-8")
-                        )
-                        response_data = {
-                            "type": "public_key",
-                            "username": target_username,
-                            "public_key": public_key_pem,
-                        }
-                        # Send back the response to the original sender server
-                        response = {
-                            "type": "forward_response",
-                            "original_request": forwarded_data,
-                            "data": response_data
-                        }
-                        await send_response_to_server(response, original_sender)
-                        logger.debug(f"Processed forwarded request for {target_username}, sent response to {original_sender}")
-                    else:
-                        # User not found
-                        response_data = {
-                            "type": "error",
-                            "message": f"Public key for {target_username} not found.",
-                        }
-                        response = {
-                            "type": "forward_response",
-                            "original_request": forwarded_data,
-                            "data": response_data
-                        }
-                        await send_response_to_server(response, original_sender)
-                        logger.debug(f"User {target_username} not found, sent error response to {original_sender}")
-            elif msg_type == "forward_response":
-                # Handle forwarded response
-                original_request = data.get("original_request")
-                response_data = data.get("data")
-                requesting_username = original_request.get("requesting_username")
-                # Find the websocket of the requesting client
-                client_ws = online_users.get(requesting_username)
-                if client_ws:
-                    await send_response(client_ws, response_data)
-                    logger.debug(f"Forwarded response to {requesting_username}: {response_data}")
-                else:
-                    logger.warning(f"Requesting client {requesting_username} not found.")
+
             elif msg_type == "client_removal":
                 username = data.get("username")
                 if username and username in global_user_map:
                     del global_user_map[username]
                     logger.info(f"Removed user {username} from global_user_map.")
-            elif msg_type == "message_forward":
-                # Handle forwarded messages
-                forwarded_data = data.get("data")
-                sender_username = forwarded_data.get("from")
-                # Process the message as if it was received from a local client
-                await process_signed_data(None, forwarded_data, sender_username)
+
             else:
                 logger.warning(f"Unhandled message type from neighbor server: {msg_type}")
+
         except Exception as e:
             logger.error(f"Error processing message from neighbor server: {e}")
+
+async def process_forward_response(data):
+    """
+    Process a forwarded response and deliver it to the requesting client.
+
+    Args:
+        data (dict): The data containing the response.
+    """
+    original_request = data.get("original_request")
+    response_data = data.get("data")
+    requesting_username = original_request.get("requesting_username")
+
+    # Find the websocket of the requesting client
+    client_ws = online_users.get(requesting_username)
+    if client_ws:
+        await send_response(client_ws, response_data)
+        logger.debug(f"Forwarded response to {requesting_username}: {response_data}")
+    else:
+        logger.warning(f"Requesting client {requesting_username} not found.")
+
+async def process_private_message_forward(data):
+    """
+    Process a forwarded private message and deliver it to the local recipient.
+
+    Args:
+        data (dict): The data containing the private message.
+    """
+    recipient = data.get("to")
+    sender = data.get("from")
+    message_body = data.get("message")
+    counter = data.get("counter")
+
+    if recipient in online_users:
+        recipient_ws = online_users[recipient]
+        recipient_public_key = user_public_keys.get(recipient)
+        if not recipient_public_key:
+            logger.warning(f"No public key found for user {recipient}.")
+            return
+
+        private_message = {
+            "type": "private_message",
+            "from": sender,
+            "message": message_body,
+            "counter": counter,
+        }
+
+        try:
+            encrypted_payload = encrypt_message(
+                json.dumps(private_message), recipient_public_key
+            )
+            await recipient_ws.send(encrypted_payload)
+            logger.debug(f"Forwarded private message from {sender} to {recipient}.")
+        except Exception as e:
+            logger.error(f"Failed to send forwarded private message: {e}")
+    else:
+        logger.warning(f"Recipient {recipient} not found on this server.")
+
+async def process_chat_message_forward(data):
+    """
+    Process a forwarded chat message and deliver it to local recipients.
+
+    Args:
+        data (dict): The data containing the chat message.
+    """
+    sender_username = data.get("from")
+    await handle_chat_message(None, sender_username, data)
+
+async def process_get_public_key_forward(data, original_sender):
+    """
+    Process a forwarded public key request and send the response back to the requesting server.
+
+    Args:
+        data (dict): The data containing the public key request.
+        original_sender (str): The address of the server that sent the request.
+    """
+    target_username = data.get("username")
+    requesting_username = data.get("requesting_username")
+
+    if target_username in user_public_keys:
+        public_key_pem = (
+            user_public_keys[target_username]
+            .public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            .decode("utf-8")
+        )
+        response_data = {
+            "type": "public_key",
+            "username": target_username,
+            "public_key": public_key_pem,
+        }
+        # Send back the response to the original sender server
+        await forward_message_to_server("forward_response", {
+            "original_request": data,
+            "data": response_data
+        }, original_sender)
+        logger.debug(f"Processed forwarded request for {target_username}, sent response to {original_sender}")
+    else:
+        # User not found
+        response_data = {
+            "type": "error",
+            "message": f"Public key for {target_username} not found.",
+        }
+        await forward_message_to_server("forward_response", {
+            "original_request": data,
+            "data": response_data
+        }, original_sender)
+        logger.debug(f"User {target_username} not found, sent error response to {original_sender}")
+
+async def process_broadcast_forward(data):
+    """
+    Process a forwarded broadcast message and deliver it to local users.
+
+    Args:
+        data (dict): The data containing the broadcast message.
+    """
+    message_id = data.get("message_id")
+    if not message_id:
+        logger.warning("Received broadcast message without message_id.")
+        return
+
+    # Check if we've already processed this message
+    if message_id in processed_message_ids:
+        logger.debug(f"Already processed broadcast message with ID {message_id}. Skipping.")
+        return
+    processed_message_ids.add(message_id)
+
+    sender = data.get("from")
+    message_body = data.get("message")
+
+    # Send to local users
+    broadcast_message = {
+        "type": "broadcast",
+        "from": sender,
+        "message": message_body
+    }
+    for user, ws in online_users.items():
+        if user != sender:
+            recipient_public_key = user_public_keys.get(user)
+            if recipient_public_key:
+                try:
+                    encrypted_payload = encrypt_message(json.dumps(broadcast_message), recipient_public_key)
+                    await ws.send(encrypted_payload)
+                    logger.debug(f"Broadcast message from {sender} sent to {user}.")
+                except Exception as e:
+                    logger.error(f"Failed to send broadcast message to {user}: {e}")
+            else:
+                logger.warning(f"No public key found for user {user}. Skipping broadcast.")
+
+    # Forward to other neighbor servers
+    await forward_broadcast_to_neighbors(data)
+
+async def forward_broadcast_to_neighbors(data):
+    """
+    Forward the broadcast message to all neighbor servers, avoiding loops.
+
+    Args:
+        data (dict): The data containing the broadcast message.
+    """
+    for neighbor_ws in neighbor_connections.values():
+        forward_data = {
+            "type": "message_forward",
+            "message_type": "broadcast",
+            "data": data,
+            "original_sender": f"{self_host}:{self_port}"
+        }
+        await neighbor_ws.send(json.dumps(forward_data))
+        logger.debug("Forwarded broadcast message to neighbor server.")
 
 async def forward_request_to_server(data, server_address):
     """
@@ -671,7 +809,7 @@ async def handle_broadcast(websocket, username, message_body):
         "message": message_body
     }
 
-    # Encrypt and send broadcast message to all users except the sender
+    # Send to local users
     for user, ws in online_users.items():
         if user != username:
             recipient_public_key = user_public_keys.get(user)
@@ -682,15 +820,18 @@ async def handle_broadcast(websocket, username, message_body):
                     logger.debug(f"Broadcast message sent to {user}.")
                 except Exception as e:
                     logger.error(f"Failed to send broadcast message to {user}: {e}")
-                    response = {
-                        "type": "status",
-                        "status": "error",
-                        "message": f"Failed to send broadcast to {user}."
-                    }
-                    await send_response(websocket, response)
                     continue
             else:
                 logger.warning(f"No public key found for user {user}. Skipping broadcast.")
+
+    # Forward the broadcast message to neighbor servers
+    data = {
+        "from": username,
+        "message": message_body,
+        "message_id": str(uuid.uuid4())
+    }
+    await forward_broadcast_to_neighbors(data)
+
     response = {
         "type": "status",
         "status": "success",
@@ -703,7 +844,7 @@ async def handle_chat_message(websocket, username, data):
     Handle a 'chat' message sent by a user to multiple recipients.
 
     Args:
-        websocket: The websocket of the sender.
+        websocket: The websocket of the sender (can be None).
         username (str): The username of the sender.
         data (dict): The data containing the chat message.
     """
@@ -714,12 +855,13 @@ async def handle_chat_message(websocket, username, data):
 
     if not iv or not symm_keys or not participants or not encrypted_chat:
         logger.warning(f"Chat message from {username} missing fields.")
-        response = {
-            "type": "status",
-            "status": "error",
-            "message": "Missing fields in chat message.",
-        }
-        await send_response(websocket, response)
+        if websocket:
+            response = {
+                "type": "status",
+                "status": "error",
+                "message": "Missing fields in chat message.",
+            }
+            await send_response(websocket, response)
         return
 
     # Send the message to all participants except the sender
@@ -759,27 +901,28 @@ async def handle_chat_message(websocket, username, data):
         elif recipient in global_user_map:
             # Recipient is connected to another server, forward the message
             target_server_address = global_user_map[recipient]
-            # Add sender's username to data for forwarding
-            data['from'] = username
-            await forward_message_to_server(data, target_server_address)
+            data['from'] = username  # Ensure 'from' field is set
+            await forward_message_to_server("chat", data, target_server_address)
             logger.info(f"Forwarded chat message from {username} to {recipient} via server {target_server_address}.")
         else:
             logger.warning(f"Chat message recipient {recipient} not found.")
             continue
 
     # Optionally, send a confirmation back to the sender
-    response = {
-        "type": "status",
-        "status": "success",
-        "message": "Group message sent successfully."
-    }
-    await send_response(websocket, response)
+    if websocket:
+        response = {
+            "type": "status",
+            "status": "success",
+            "message": "Group message sent successfully."
+        }
+        await send_response(websocket, response)
 
-async def forward_message_to_server(data, server_address):
+async def forward_message_to_server(message_type, data, server_address):
     """
     Forwards a message to another server.
 
     Args:
+        message_type (str): The type of the message to forward.
         data (dict): The message data to forward.
         server_address (str): The address of the target server.
     """
@@ -800,11 +943,12 @@ async def forward_message_to_server(data, server_address):
     # Send the message
     forward_data = {
         "type": "message_forward",
-        "original_sender": f"{self_host}:{self_port}",
-        "data": data
+        "message_type": message_type,
+        "data": data,
+        "original_sender": f"{self_host}:{self_port}"
     }
     await neighbor_ws.send(json.dumps(forward_data))
-    logger.debug(f"Forwarded message {data['type']} to {server_address}")
+    logger.debug(f"Forwarded {message_type} message to {server_address}")
 
 async def process_signed_data(websocket, data, username):
     msg_type = data.get("type")
@@ -893,8 +1037,8 @@ async def handle_private_message(websocket, username, data):
     elif recipient in global_user_map:
         # Recipient is on another server, forward the message
         target_server_address = global_user_map[recipient]
-        data['from'] = username
-        await forward_request_to_server(data, target_server_address)
+        data['from'] = username  # Ensure 'from' field is set
+        await forward_message_to_server("private_message", data, target_server_address)
         logger.info(f"Forwarded private message from {username} to {recipient} via server {target_server_address}.")
         response = {
             "type": "status",
@@ -911,14 +1055,23 @@ async def handle_private_message(websocket, username, data):
         }
         await send_response(websocket, response)
 
-async def forward_message_to_neighbors(data):
-    for websocket in neighbor_connections.values():
+async def forward_message_to_neighbors(message_type, data):
+    """
+    Forward a message to all neighbor servers.
+
+    Args:
+        message_type (str): The type of the message to forward.
+        data (dict): The message data to forward.
+    """
+    for neighbor_ws in neighbor_connections.values():
         forward_data = {
             "type": "message_forward",
-            "data": data
+            "message_type": message_type,
+            "data": data,
+            "original_sender": f"{self_host}:{self_port}"
         }
-        await websocket.send(json.dumps(forward_data))
-        logger.debug("Forwarded message to neighbor server.")
+        await neighbor_ws.send(json.dumps(forward_data))
+        logger.debug(f"Forwarded {message_type} message to neighbor server.")
 
 async def send_response(websocket, response):
     if websocket is None:
