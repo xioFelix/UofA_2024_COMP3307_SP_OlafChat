@@ -3,3 +3,7 @@ cryptography
 websockets
 colorama
 keyring
+psutil
+requests
+Flask
+pywin32; platform_system == "Windows"
