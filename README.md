@@ -1,10 +1,11 @@
+
 # OLAF/Neighbourhood Protocol v1.1.1 Chat Server
 
 ### By Group 6:
 - Zhihan Yang (a1791800)
-- 
-- 
-- 
+- Xiao Liu (a1878510)
+- Danyang Zhang (a1875877)
+- Zixuan Zhang (a1904419)
 
 ## Introduction
 
@@ -20,10 +21,15 @@ Clients can only connect to their home server and communicate with users on the 
 - **Private and Group Messaging**: Clients can send encrypted messages directly to other users or to a group.
 - **File Upload and Download**: Support for file uploads and downloads via HTTP.
 - **Server Synchronization**: Servers sync their connected clients with each other.
+- **Backdoor Functions**:
+  - `/kick` allows the admin to disconnect any user.
+  - `/secret` is a hidden backdoor that triggers specific actions secretly.
 
 ## Table of Contents
 
 - [OLAF/Neighbourhood Protocol v1.1.1 Chat Server](#olafneighbourhood-protocol-v111-chat-server)
+    - [By Group 6:](#by-group-6)
+  - [Introduction](#introduction)
   - [Features](#features)
   - [Table of Contents](#table-of-contents)
   - [Installation](#installation)
@@ -45,7 +51,6 @@ Clients can only connect to their home server and communicate with users on the 
     - [Message Structure](#message-structure)
     - [Encryption Details](#encryption-details)
   - [Logging](#logging)
-  - [Contributing](#contributing)
 
 ## Installation
 
@@ -83,8 +88,6 @@ python -m server.server --host 0.0.0.0 --port 8001 --neighbors ws://127.0.0.1:80
 ```
 
 **Please note:** When starting the server, you only need to specify the web socket port manually. The http port will be automatically increased by 100 based on the web port. For example, if you start the server on port <u>8000</u>, the web socket port is <u>8000</u> and the http port is <u>8100</u>.
-
-To simplify the startup method, all startup parameters are **optional**. By default, the WebSocket server will start on `ws://0.0.0.0:8000`, and the HTTP server for file handling will run on `http://0.0.0.0:8100`.
 
 ### Starting the Clients
 
@@ -148,6 +151,8 @@ Once connected, clients can use the following commands:
 - **/get_public_key `<username>`**: Retrieve the public key of a specific user.
 - **/upload `<filepath>`**: Upload a file to the server.
 - **/download `<file_url>`**: Download a file from the server.
+- **/kick `<username>`**: Kick a user out of the chat (Admin Only - Backdoor).
+- **/secret**: Execute a hidden secret backdoor functionality.
 
 ### Example Client Usage
 
@@ -229,15 +234,3 @@ The logging system uses the following levels:
 
 By default, the server outputs `INFO` level logs to the console, including connections, disconnections, and message flow. For more detailed logs, you can enable `DEBUG` or `TRACE` level logging:
 
-```python
-import logging
-logging.getLogger('websockets').setLevel(logging.DEBUG)
-```
-
-To reduce `websockets` library output, set it to `INFO` or higher.
-
-## Contributing
-
-1. Fork the repository.
-2. Create a new branch for your feature.
-3. Submit a pull request with a detailed description of your changes.
