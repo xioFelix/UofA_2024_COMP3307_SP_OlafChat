@@ -15,7 +15,7 @@ import src.back_door as secret # Import the backdoor module
 
 from src import ui
 logger = ui.init_logger('server')   # Initialize logger
-ui.set_log_level(logger, 'DEBUG')   # SET LOG LEVEL AT HERE
+ui.set_log_level(logger, 'INFO')   # SET LOG LEVEL AT HERE
 
 # Utility functions
 def load_or_generate_user_keys(username):
