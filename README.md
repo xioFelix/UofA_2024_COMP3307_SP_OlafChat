@@ -63,7 +63,7 @@ Ensure you have the following installed:
 
 ### Install Dependencies
 
-1. Clone the repository:
+1. Clone the repository(Private):
     ```bash
     git clone https://github.com/xioFelix/UofA_2024_SP_OlafChat.git
     cd UofA_2024_SP_OlafChat

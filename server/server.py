@@ -14,7 +14,7 @@ from aiohttp import web
 
 from src import ui
 logger = ui.init_logger('server')   # Initialize logger
-ui.set_log_level(logger, 'DEBUG')   # SET LOG LEVEL AT HERE
+ui.set_log_level(logger, 'INFO')   # SET LOG LEVEL AT HERE
 
 # Global state
 online_users = {}     # username -> websocket

