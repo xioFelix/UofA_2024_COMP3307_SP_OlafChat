@@ -5,7 +5,7 @@
 - Zhihan Yang (a1791800)
 - Xiao Liu (a1878510)
 - Danyang Zhang (a1875877)
-- Zixuan Zhang (a1904419)
+- Yuzhe Zhang (a1809783)
 
 ## Introduction
 
