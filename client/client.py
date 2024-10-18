@@ -11,8 +11,6 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from websockets import connect
 from aiohttp import ClientSession
-import src.back_door as secret  # Import the backdoor module
-
 from src import ui
 
 logger = ui.init_logger("server")  # Initialize logger
