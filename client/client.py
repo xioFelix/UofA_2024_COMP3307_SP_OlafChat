@@ -632,14 +632,47 @@ class Client:
                 print(f"Exception during file download: {e}")
 
     async def get_public_key(self, target_username):
-        data = {
-            "type": "get_public_key",
-            "username": target_username,
-            "requesting_username": self.username  # Include your own username
-        }
-        signed_data = self.create_signed_data(data)
-        await self.send_signed_message(signed_data)
-        logger.debug(f"Requested public key for {target_username}.")
+        """
+        Retrieve the public key of a target user, with caching and retry mechanism.
+
+        Args:
+            target_username (str): The username of the target user.
+        """
+        # If the public key is already cached, return immediately
+        if target_username in self.received_user_public_keys:
+            logger.debug(f"Public key for {target_username} is already cached.")
+            return
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            data = {
+                "type": "get_public_key",
+                "username": target_username,
+                "requesting_username": self.username  # Include your own username
+            }
+            signed_data = self.create_signed_data(data)
+            await self.send_signed_message(signed_data)
+            logger.debug(f"Requested public key for {target_username}, attempt {attempt + 1}.")
+
+            # Wait for the response with a timeout
+            try:
+                response = await asyncio.wait_for(self.websocket.recv(), timeout=2)
+                decrypted_json = decrypt_message(response, self.private_key)
+                response_data = json.loads(decrypted_json)
+                if response_data.get("type") == "public_key":
+                    public_key_pem = response_data.get("public_key")
+                    public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+                    self.received_user_public_keys[target_username] = public_key
+                    logger.info(f"Received and cached public key for {target_username}.")
+                    return
+                else:
+                    logger.warning(f"Unexpected response type: {response_data.get('type')}")
+            except asyncio.TimeoutError:
+                logger.warning(f"Timeout while waiting for public key of {target_username}. Retrying...")
+            except Exception as e:
+                logger.error(f"Error while getting public key of {target_username}: {e}")
+
+        logger.error(f"Failed to get public key for {target_username} after {max_retries} attempts.")
 
     def show_help(self):
         help_text = """
