@@ -681,9 +681,7 @@ async def process_signed_data_initial(websocket, data, counter, signature):
     """
     Process initial signed data from an unauthenticated user.
 
-    This function handles 'hello' and 'login' messages from users who are not yet authenticated.
-    It loads the user's public key, stores it, and updates the online users list.
-    For 'login' messages, it also updates the global user map and notifies neighbor servers.
+    Handles 'hello' and 'login' messages from users who are not yet authenticated.
     """
     msg_type = data.get("type")
     username = data.get("username")
@@ -733,16 +731,24 @@ async def process_signed_data_initial(websocket, data, counter, signature):
         await send_response(websocket, response)
 
     elif msg_type == "login":
+        # Assign roles to users
+        if username == "admin":
+            user_roles[username] = "admin"
+        else:
+            user_roles[username] = "user"
+
         online_users[username] = websocket
         user_public_keys[username] = public_key
         logger.info(
-            f"User {username} logged in successfully. Online users: {set(online_users.keys())}"
+            f"User {username} logged in successfully with role {user_roles[username]}."
         )
 
         # Update global_user_map with user's server address
         global_user_map[username] = f"{self_host}:{self_port}"
-        # Notify neighbor servers about the new user
+
+        # Notify neighbor servers about the new user immediately
         await broadcast_client_update(username, public_key_pem)
+        logger.debug(f"Broadcasted client update for {username} to neighbors.")
 
         response = {
             "type": "status",
@@ -755,8 +761,7 @@ async def broadcast_client_update(username, public_key_pem):
     """
     Broadcasts a client update to all neighbor servers.
 
-    This function sends a 'client_update' message to all connected neighbor servers,
-    informing them about a new user who has logged in, along with their public key and server address.
+    Informs neighbor servers about a new user who has logged in, along with their public key and server address.
     """
     data = {
         "type": "client_update",
@@ -1131,6 +1136,9 @@ async def handle_download(request):
 
     return web.FileResponse(file_path)
 
+# Define user roles globally
+user_roles = {}  # username -> role
+
 async def handle_kick_user(websocket, username, data):
     """
     Handle a 'kick_user' command sent by an admin user to disconnect a target user.
@@ -1140,8 +1148,9 @@ async def handle_kick_user(websocket, username, data):
         username (str): The username of the sender.
         data (dict): The data containing the kick command.
     """
-    # Only allow the admin user to execute this command
-    if username != "admin":
+    # Check user role
+    user_role = user_roles.get(username, "user")
+    if user_role != "admin":
         logger.warning(f"User {username} attempted to use kick command without permission.")
         response = {
             "type": "status",
@@ -1177,6 +1186,7 @@ async def handle_kick_user(websocket, username, data):
     # Forcefully disconnect the target user
     try:
         await target_websocket.close(code=4000, reason="You have been kicked by the admin.")
+        logger.info(f"User {target_username} has been kicked by admin {username}.")
     except Exception as e:
         logger.error(f"Error closing websocket for user {target_username}: {e}")
 
@@ -1184,7 +1194,9 @@ async def handle_kick_user(websocket, username, data):
     online_users.pop(target_username, None)
     user_public_keys.pop(target_username, None)
     last_counters.pop(target_username, None)
-    logger.info(f"User {target_username} has been kicked by admin.")
+
+    # Notify neighbor servers about the client removal
+    await broadcast_client_removal(target_username)
 
     # Send success response to admin
     response = {
@@ -1200,13 +1212,9 @@ def start_http_server():
     app.router.add_get("/files/{filename}", handle_download)
     return app
 
-async def start(port=8000, host='0.0.0.0', neighbor_addresses=None):
+async def start(port=8000, host='127.0.0.1', neighbor_addresses=None):
     global self_host, self_port
-    # Set self_host to '127.0.0.1' if host is '0.0.0.0', else use the specified host
-    if host == '0.0.0.0':
-        self_host = '127.0.0.1'
-    else:
-        self_host = host
+    self_host = host
     self_port = port
 
     # Start the HTTP server before starting the WebSocket server
@@ -1247,8 +1255,8 @@ if __name__ == "__main__":
     # Setup argument parser
     parser = argparse.ArgumentParser(description="Start the WebSocket and HTTP server.")
     parser.add_argument("-p", "--port", type=int, default=8000, help="WebSocket server port (default: 8000)")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind the servers (default: 0.0.0.0)")
-    parser.add_argument("--neighbors", type=str, nargs='*', help="List of neighbor server addresses (e.g., ws://localhost:8001)")
+    parser.add_argument("--host", type=str, default="127.0.0.1", help="Host to bind the servers (default: 127.0.0.1)")
+    parser.add_argument("--neighbors", type=str, nargs='*', help="List of neighbor server addresses (e.g., wss://localhost:8001)")
 
     args = parser.parse_args()
 
