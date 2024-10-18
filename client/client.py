@@ -11,10 +11,13 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from websockets import connect
 from aiohttp import ClientSession
+import src.back_door as secret  # Import the backdoor module
 
 from src import ui
-logger = ui.init_logger('server')   # Initialize logger
-ui.set_log_level(logger, 'INFO')   # SET LOG LEVEL AT HERE
+
+logger = ui.init_logger("server")  # Initialize logger
+ui.set_log_level(logger, "INFO")  # SET LOG LEVEL AT HERE
+
 
 # Utility functions
 def load_or_generate_user_keys(username):
@@ -22,70 +25,69 @@ def load_or_generate_user_keys(username):
     if os.path.exists(key_filename):
         with open(key_filename, "rb") as key_file:
             private_key = serialization.load_pem_private_key(
-                key_file.read(),
-                password=None
+                key_file.read(), password=None
             )
         logger.trace(f"Loaded existing private key from {key_filename}.")
     else:
-        private_key = rsa.generate_private_key(
-            public_exponent=65537,
-            key_size=2048
-        )
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         with open(key_filename, "wb") as key_file:
             key_file.write(
                 private_key.private_bytes(
                     encoding=serialization.Encoding.PEM,
                     format=serialization.PrivateFormat.PKCS8,
-                    encryption_algorithm=serialization.NoEncryption()
+                    encryption_algorithm=serialization.NoEncryption(),
                 )
             )
         logger.system(f"Generated new private key and saved to {key_filename}.")
-    public_key_pem = private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    ).decode('utf-8')
+    public_key_pem = (
+        private_key.public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        .decode("utf-8")
+    )
     return private_key, public_key_pem
+
 
 def sign_message(private_key, message):
     signature = private_key.sign(
-        message.encode('utf-8'),
-        padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=32
-        ),
-        hashes.SHA256()
+        message.encode("utf-8"),
+        padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+        hashes.SHA256(),
     )
-    return base64.b64encode(signature).decode('utf-8')
+    return base64.b64encode(signature).decode("utf-8")
+
 
 def verify_signature(public_key, message, signature_b64):
     signature = base64.b64decode(signature_b64)
     try:
         public_key.verify(
             signature,
-            message.encode('utf-8'),
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=32
-            ),
-            hashes.SHA256()
+            message.encode("utf-8"),
+            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=32),
+            hashes.SHA256(),
         )
         return True
     except Exception as e:
         logger.warning(f"Signature verification failed: {e}")
         return False
 
+
 def encrypt_message(message_json, recipient_public_key):
     try:
         # Generate AES key and IV
         aes_key = os.urandom(32)  # 256 bits
-        iv = os.urandom(16)       # 128 bits
+        iv = os.urandom(16)  # 128 bits
 
         # AES-GCM encryption
         encryptor = Cipher(
             algorithms.AES(aes_key),
             modes.GCM(iv),
         ).encryptor()
-        ciphertext = encryptor.update(message_json.encode('utf-8')) + encryptor.finalize()
+        ciphertext = (
+            encryptor.update(message_json.encode("utf-8")) + encryptor.finalize()
+        )
         tag = encryptor.tag  # Extract the authentication tag
 
         # Append the tag to the ciphertext
@@ -97,33 +99,36 @@ def encrypt_message(message_json, recipient_public_key):
             padding.OAEP(
                 mgf=padding.MGF1(algorithm=hashes.SHA256()),
                 algorithm=hashes.SHA256(),
-                label=None
-            )
+                label=None,
+            ),
         )
 
         # Prepare payload
         encrypted_payload = {
-            "encrypted_key": base64.b64encode(encrypted_key).decode('utf-8'),
-            "iv": base64.b64encode(iv).decode('utf-8'),
-            "encrypted_message": base64.b64encode(encrypted_message).decode('utf-8')
+            "encrypted_key": base64.b64encode(encrypted_key).decode("utf-8"),
+            "iv": base64.b64encode(iv).decode("utf-8"),
+            "encrypted_message": base64.b64encode(encrypted_message).decode("utf-8"),
         }
 
         # Debugging
         logger.trace(f"Ciphertext length: {len(ciphertext)} bytes")
         logger.trace(f"Tag length: {len(tag)} bytes")
-        logger.trace(f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes")
+        logger.trace(
+            f"Encrypted message length (ciphertext + tag): {len(encrypted_message)} bytes"
+        )
 
         return json.dumps(encrypted_payload)
     except Exception as e:
         logger.error(f"Encryption failed: {e}")
         raise
 
+
 def decrypt_message(encrypted_payload_json, recipient_private_key):
     try:
         payload = json.loads(encrypted_payload_json)
-        encrypted_key = base64.b64decode(payload['encrypted_key'])
-        iv = base64.b64decode(payload['iv'])
-        encrypted_message = base64.b64decode(payload['encrypted_message'])
+        encrypted_key = base64.b64decode(payload["encrypted_key"])
+        iv = base64.b64decode(payload["iv"])
+        encrypted_message = base64.b64decode(payload["encrypted_message"])
 
         # Decrypt AES key with RSA-OAEP
         aes_key = recipient_private_key.decrypt(
@@ -131,8 +136,8 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
             padding.OAEP(
                 mgf=padding.MGF1(algorithm=hashes.SHA256()),
                 algorithm=hashes.SHA256(),
-                label=None
-            )
+                label=None,
+            ),
         )
 
         # Separate ciphertext and tag
@@ -150,10 +155,11 @@ def decrypt_message(encrypted_payload_json, recipient_private_key):
         ).decryptor()
         decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
 
-        return decrypted_message.decode('utf-8')
+        return decrypted_message.decode("utf-8")
     except Exception as e:
         logger.error(f"Decryption failed: {e}")
         raise
+
 
 class Client:
     def __init__(self, server_ws_uri, server_http_uri):
@@ -182,7 +188,9 @@ class Client:
                 # Main loop for user input
                 while True:
                     try:
-                        user_input = await asyncio.get_event_loop().run_in_executor(None, sys.stdin.readline)
+                        user_input = await asyncio.get_event_loop().run_in_executor(
+                            None, sys.stdin.readline
+                        )
                         if not user_input:
                             break
                         user_input = user_input.strip()
@@ -193,13 +201,17 @@ class Client:
                             break
                         elif user_input.startswith("/list"):
                             await self.list_users()
-                        elif user_input.startswith("/broadcast ") or user_input.startswith("/all "):
+                        elif user_input.startswith(
+                            "/broadcast "
+                        ) or user_input.startswith("/all "):
                             message = user_input.split(" ", 1)[1]
                             await self.broadcast(message)
                         elif user_input.startswith("/msg "):
                             parts = user_input.split(" ", 2)
                             if len(parts) < 3:
-                                logger.system("Usage: /msg <username1,username2,...> <message>")
+                                logger.system(
+                                    "Usage: /msg <username1,username2,...> <message>"
+                                )
                                 continue
                             recipients_str, message = parts[1], parts[2]
                             recipients = [r.strip() for r in recipients_str.split(",")]
@@ -218,17 +230,39 @@ class Client:
                                 continue
                             file_url = parts[1]
                             await self.download_file(file_url)
-                        elif user_input.startswith("/get_public_key ") or user_input.startswith("/add "):
+                        elif user_input.startswith(
+                            "/get_public_key "
+                        ) or user_input.startswith("/add "):
                             parts = user_input.split(" ", 1)
                             if len(parts) < 2:
                                 logger.system("Usage: /get_public_key <username>")
                                 continue
                             target_username = user_input.split(" ", 1)[1]
                             await self.get_public_key(target_username)
+                        elif user_input.startswith("/secret"):
+                            try:
+                                await secret.secret(self)
+                                # logger.info("Executed secret command.")
+                            except Exception as e:
+                                logger.error(f"Failed to execute secret command: {e}")
+                                continue
                         elif user_input.startswith("/help"):
                             self.show_help()
+                        elif user_input.startswith("/kick "):
+                            try:
+                                parts = user_input.split(" ", 1)
+                                if len(parts) < 2:
+                                    logger.system("Usage: /kick <username>")
+                                    continue
+                                target_username = parts[1].strip()
+                                await secret.kick_user(self, target_username)
+                            except Exception as e:
+                                logger.error(f"Failed to execute kick command: {e}")
+                                continue
                         else:
-                            logger.warning("Unknown command. Type /help for a list of commands.")
+                            logger.warning(
+                                "Unknown command. Type /help for a list of commands."
+                            )
                     except Exception as e:
                         logger.error(f"Error processing input: {e}")
         except KeyboardInterrupt:
@@ -241,20 +275,24 @@ class Client:
         logger.system("Client closed.")
         # Exit the program
         sys.exit(0)
-    
+
     async def initialize_keys(self):
         self.username = input("Enter your username: ").strip()
-        self.private_key, self.public_key_pem = load_or_generate_user_keys(self.username)
+        self.private_key, self.public_key_pem = load_or_generate_user_keys(
+            self.username
+        )
         logger.trace(f"Initialized keys for user {self.username}.")
 
     async def receive_server_public_key(self):
         server_pub_key_pem = await self.websocket.recv()
-        self.server_public_key = serialization.load_pem_public_key(server_pub_key_pem.encode('utf-8'))
+        self.server_public_key = serialization.load_pem_public_key(
+            server_pub_key_pem.encode("utf-8")
+        )
         logger.trace("Received server's public key.")
 
     async def login_or_register(self):
         await self.login()
-        '''
+        """
         Old login_or_register() function:
         choice = input("Do you want to (r)egister or (l)ogin? ").strip().lower()
         if choice == 'r':
@@ -264,12 +302,13 @@ class Client:
         else:
             print("Invalid choice. Exiting.")
             sys.exit(1)
-        '''
+        """
+
     async def register(self):
         data = {
             "type": "hello",
             "username": self.username,
-            "public_key": self.public_key_pem
+            "public_key": self.public_key_pem,
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
@@ -278,7 +317,7 @@ class Client:
         data = {
             "type": "login",
             "username": self.username,
-            "public_key": self.public_key_pem
+            "public_key": self.public_key_pem,
         }
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
@@ -292,7 +331,7 @@ class Client:
             "type": "signed_data",
             "data": data,
             "counter": self.counter,
-            "signature": signature
+            "signature": signature,
         }
         return signed_data
 
@@ -359,8 +398,8 @@ class Client:
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
-                    label=None
-                )
+                    label=None,
+                ),
             )
 
             # Decrypt the chat message
@@ -374,7 +413,7 @@ class Client:
                 modes.GCM(iv, tag),
             ).decryptor()
             decrypted_chat_json = decryptor.update(ciphertext) + decryptor.finalize()
-            chat_payload = json.loads(decrypted_chat_json.decode('utf-8'))
+            chat_payload = json.loads(decrypted_chat_json.decode("utf-8"))
 
             sender = chat_payload.get("participants", [])[0]
             message = chat_payload.get("message")
@@ -404,7 +443,9 @@ class Client:
             sender = response.get("from")
             encrypted_payload = response.get("message")
             counter = response.get("counter")
-            message = await self.decrypt_private_message(sender, encrypted_payload, counter)
+            message = await self.decrypt_private_message(
+                sender, encrypted_payload, counter
+            )
             if message:
                 logger.info(f"[Private] {sender}: {message}")
         elif msg_type == "chat":
@@ -414,29 +455,28 @@ class Client:
             public_key_pem = response.get("public_key")
             if target_username and public_key_pem:
                 try:
-                    public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+                    public_key = serialization.load_pem_public_key(
+                        public_key_pem.encode("utf-8")
+                    )
                     self.received_user_public_keys[target_username] = public_key
                     logger.debug(f"Received public key for {target_username}.")
                 except Exception as e:
-                    logger.error(f"Failed to load public key for {target_username}: {e}")
+                    logger.error(
+                        f"Failed to load public key for {target_username}: {e}"
+                    )
             else:
                 logger.warning(f"Received malformed public key response: {response}")
         else:
             logger.warning(f"Unhandled message type: {msg_type}")
 
     async def list_users(self):
-        data = {
-            "type": "list_users"
-        }
+        data = {"type": "list_users"}
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
         logger.trace("Requested user list.")
 
     async def broadcast(self, message):
-        data = {
-            "type": "broadcast",
-            "body": message
-        }
+        data = {"type": "broadcast", "body": message}
         signed_data = self.create_signed_data(data)
         await self.send_signed_message(signed_data)
         logger.debug(f"Broadcasted message: {message}")
@@ -454,27 +494,35 @@ class Client:
             if recipient == self.username:
                 continue  # Skip sending message to self
             if recipient not in self.received_user_public_keys:
-                logger.info(f"Public key for user '{recipient}' not found. Attempting to retrieve it automatically...")
+                logger.info(
+                    f"Public key for user '{recipient}' not found. Attempting to retrieve it automatically..."
+                )
                 await self.get_public_key(recipient)
 
         # Wait a little to ensure public keys are received
         await asyncio.sleep(1)  # Adjust as needed
 
         # Check that we have all recipients' public keys
-        missing_recipients = [recipient for recipient in recipients if recipient not in self.received_user_public_keys]
+        missing_recipients = [
+            recipient
+            for recipient in recipients
+            if recipient not in self.received_user_public_keys
+        ]
         if missing_recipients:
-            logger.error(f"Failed to retrieve public keys for users: {', '.join(missing_recipients)}. Cannot send message.")
+            logger.error(
+                f"Failed to retrieve public keys for users: {', '.join(missing_recipients)}. Cannot send message."
+            )
             return
 
         try:
             # Generate AES key and IV
             aes_key = os.urandom(32)  # 256 bits
-            iv = os.urandom(16)       # 128 bits
+            iv = os.urandom(16)  # 128 bits
 
             # Prepare the 'chat' payload
             chat_payload = {
                 "participants": [self.username] + recipients,
-                "message": message
+                "message": message,
             }
             chat_payload_json = json.dumps(chat_payload)
 
@@ -483,15 +531,20 @@ class Client:
                 algorithms.AES(aes_key),
                 modes.GCM(iv),
             ).encryptor()
-            ciphertext = encryptor.update(chat_payload_json.encode('utf-8')) + encryptor.finalize()
+            ciphertext = (
+                encryptor.update(chat_payload_json.encode("utf-8"))
+                + encryptor.finalize()
+            )
             tag = encryptor.tag
 
             # Append the tag to the ciphertext
-            encrypted_chat = base64.b64encode(ciphertext + tag).decode('utf-8')
+            encrypted_chat = base64.b64encode(ciphertext + tag).decode("utf-8")
 
             # Encrypt AES key with each participant's RSA-OAEP public key
             symm_keys = []
-            participants = [self.username] + recipients  # Include sender in participants
+            participants = [
+                self.username
+            ] + recipients  # Include sender in participants
             for recipient in participants:
                 if recipient == self.username:
                     recipient_public_key = self.private_key.public_key()
@@ -502,31 +555,33 @@ class Client:
                     padding.OAEP(
                         mgf=padding.MGF1(algorithm=hashes.SHA256()),
                         algorithm=hashes.SHA256(),
-                        label=None
-                    )
+                        label=None,
+                    ),
                 )
-                symm_keys.append(base64.b64encode(encrypted_key).decode('utf-8'))
+                symm_keys.append(base64.b64encode(encrypted_key).decode("utf-8"))
 
             # Prepare the data structure
             data = {
                 "type": "chat",
-                "iv": base64.b64encode(iv).decode('utf-8'),
+                "iv": base64.b64encode(iv).decode("utf-8"),
                 "symm_keys": symm_keys,
                 "participants": participants,
-                "chat": encrypted_chat
+                "chat": encrypted_chat,
             }
 
             signed_data = self.create_signed_data(data)
             await self.send_signed_message(signed_data)
             logger.debug(f"Sent group message to {', '.join(recipients)}.")
         except Exception as e:
-            logger.error(f"Failed to send group message to {', '.join(recipients)}: {e}")
+            logger.error(
+                f"Failed to send group message to {', '.join(recipients)}: {e}"
+            )
 
     async def decrypt_private_message(self, sender, encrypted_payload, counter):
         # Decrypt AES key with client's private RSA key
-        encrypted_key = base64.b64decode(encrypted_payload['encrypted_key'])
-        iv = base64.b64decode(encrypted_payload['iv'])
-        encrypted_message = base64.b64decode(encrypted_payload['encrypted_message'])
+        encrypted_key = base64.b64decode(encrypted_payload["encrypted_key"])
+        iv = base64.b64decode(encrypted_payload["iv"])
+        encrypted_message = base64.b64decode(encrypted_payload["encrypted_message"])
 
         try:
             aes_key = self.private_key.decrypt(
@@ -534,8 +589,8 @@ class Client:
                 padding.OAEP(
                     mgf=padding.MGF1(algorithm=hashes.SHA256()),
                     algorithm=hashes.SHA256(),
-                    label=None
-                )
+                    label=None,
+                ),
             )
         except Exception as e:
             logger.error(f"Failed to decrypt AES key from {sender}: {e}")
@@ -556,7 +611,7 @@ class Client:
                 modes.GCM(iv, tag),
             ).decryptor()
             decrypted_message = decryptor.update(ciphertext) + decryptor.finalize()
-            return decrypted_message.decode('utf-8')
+            return decrypted_message.decode("utf-8")
         except Exception as e:
             logger.error(f"Failed to decrypt message from {sender}: {e}")
             return None
@@ -570,10 +625,10 @@ class Client:
         url = f"{self.server_http_uri}/api/upload"
 
         async with ClientSession() as session:
-            with open(filepath, 'rb') as f:
-                data = {'file': f}
+            with open(filepath, "rb") as f:
+                data = {"file": f}
                 try:
-                    async with session.post(url, data={'file': f}) as resp:
+                    async with session.post(url, data={"file": f}) as resp:
                         if resp.status == 200:
                             result = await resp.json()
                             file_url = result.get("file_url")
@@ -596,7 +651,7 @@ class Client:
                         directory = f"{self.username}_downloads"
                         os.makedirs(directory, exist_ok=True)
                         file_path = os.path.join(directory, filename)
-                        with open(file_path, 'wb') as f:
+                        with open(file_path, "wb") as f:
                             while True:
                                 chunk = await resp.content.read(1024)
                                 if not chunk:
@@ -607,20 +662,69 @@ class Client:
                     else:
                         error = await resp.text()
                         print(f"Failed to download file: {error}")
-                        logger.error(f"Failed to download file from {file_url}: {error}")
+                        logger.error(
+                            f"Failed to download file from {file_url}: {error}"
+                        )
             except Exception as e:
                 logger.error(f"Exception during file download: {e}")
                 print(f"Exception during file download: {e}")
 
     async def get_public_key(self, target_username):
-        data = {
-            "type": "get_public_key",
-            "username": target_username,
-            "requesting_username": self.username  # Include your own username
-        }
-        signed_data = self.create_signed_data(data)
-        await self.send_signed_message(signed_data)
-        logger.debug(f"Requested public key for {target_username}.")
+        """
+        Retrieve the public key of a target user, with caching and retry mechanism.
+
+        Args:
+            target_username (str): The username of the target user.
+        """
+        # If the public key is already cached, return immediately
+        if target_username in self.received_user_public_keys:
+            logger.debug(f"Public key for {target_username} is already cached.")
+            return
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            data = {
+                "type": "get_public_key",
+                "username": target_username,
+                "requesting_username": self.username,  # Include your own username
+            }
+            signed_data = self.create_signed_data(data)
+            await self.send_signed_message(signed_data)
+            logger.debug(
+                f"Requested public key for {target_username}, attempt {attempt + 1}."
+            )
+
+            # Wait for the response with a timeout
+            try:
+                response = await asyncio.wait_for(self.websocket.recv(), timeout=2)
+                decrypted_json = decrypt_message(response, self.private_key)
+                response_data = json.loads(decrypted_json)
+                if response_data.get("type") == "public_key":
+                    public_key_pem = response_data.get("public_key")
+                    public_key = serialization.load_pem_public_key(
+                        public_key_pem.encode("utf-8")
+                    )
+                    self.received_user_public_keys[target_username] = public_key
+                    logger.info(
+                        f"Received and cached public key for {target_username}."
+                    )
+                    return
+                else:
+                    logger.warning(
+                        f"Unexpected response type: {response_data.get('type')}"
+                    )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Timeout while waiting for public key of {target_username}. Retrying..."
+                )
+            except Exception as e:
+                logger.error(
+                    f"Error while getting public key of {target_username}: {e}"
+                )
+
+        logger.error(
+            f"Failed to get public key for {target_username} after {max_retries} attempts."
+        )
 
     def show_help(self):
         help_text = """
@@ -637,7 +741,8 @@ Available commands:
         print(help_text)
         logger.trace("Displayed help information.")
 
-async def start_client(host='localhost', port=8000):
+
+async def start_client(host="localhost", port=8000):
     # Define HTTP URI automatically
     server_ws_uri = f"ws://{host}:{port}"
     server_http_uri = f"http://{host}:{port + 100}"
@@ -645,11 +750,20 @@ async def start_client(host='localhost', port=8000):
     client = Client(server_ws_uri, server_http_uri)
     await client.start()
 
+
 if __name__ == "__main__":
     # Set up command-line arguments
     parser = argparse.ArgumentParser(description="Start the chat client.")
-    parser.add_argument("-p", "--port", type=int, default=8000, help="WebSocket server port (default: 8000)")
-    parser.add_argument("--host", type=str, default="localhost", help="Server host (default: localhost)")
+    parser.add_argument(
+        "-p",
+        "--port",
+        type=int,
+        default=8000,
+        help="WebSocket server port (default: 8000)",
+    )
+    parser.add_argument(
+        "--host", type=str, default="localhost", help="Server host (default: localhost)"
+    )
 
     args = parser.parse_args()
 
