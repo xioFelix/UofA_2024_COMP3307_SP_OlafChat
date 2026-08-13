@@ -1,236 +1,99 @@
+# OLAF Neighbourhood Chat — Encrypted Protocol Prototype
 
-# OLAF/Neighbourhood Protocol v1.1.1 Chat Server
+A multi-server messaging prototype implementing the University of Adelaide's
+OLAF/Neighbourhood protocol. Clients connect to a home server, discover users on
+directly connected neighbours, and exchange private, group, broadcast, and file
+messages over WebSockets.
 
-### By Group 6:
-- Zhihan Yang (a1791800)
-- Xiao Liu (a1878510)
-- Danyang Zhang (a1875877)
-- Yuzhe Zhang (a1809783)
+> Academic four-person team project. This is a protocol-learning prototype, not a
+> production messenger and not an independently audited cryptographic product.
 
-## Introduction
+[中文说明](#中文说明)
 
-This project implements a decentralized, encrypted chat server using the OLAF/Neighbourhood Protocol. The server uses RSA for key exchange, AES-GCM for secure communication, and WebSockets for real-time communication. This implementation allows clients to send messages through their home server, and messages can travel between interconnected servers within a neighborhood. 
+## Implemented concepts
 
-Clients can only connect to their home server and communicate with users on the same server or on servers directly connected to their home server.
+- Multiple WebSocket servers joined in a neighbourhood topology.
+- RSA-2048 OAEP key wrapping and RSA-PSS/SHA-256 message signatures.
+- AES-256-GCM authenticated encryption for message payloads.
+- Monotonically increasing counters checked by the server to reject replayed
+  signed messages.
+- Direct, group, and broadcast messaging plus HTTP file transfer.
+- Online-user and public-key synchronisation between neighbouring servers.
 
-## Features
+## Security scope
 
-- **End-to-End Encryption**: Messages are secured using RSA for key exchange and AES-GCM for encryption.
-- **Replay Attack Prevention**: Signed messages with a monotonically increasing counter prevent replay attacks.
-- **Decentralized Topology**: Servers form a neighborhood, and users can communicate across servers.
-- **Private and Group Messaging**: Clients can send encrypted messages directly to other users or to a group.
-- **File Upload and Download**: Support for file uploads and downloads via HTTP.
-- **Server Synchronization**: Servers sync their connected clients with each other.
-- **Backdoor Functions**:
-  - `/kick` allows the admin to disconnect any user.
-  - `/secret` is a hidden backdoor that triggers specific actions secretly.
+The code demonstrates protocol and cryptography APIs in an academic setting. It
+uses locally generated, unencrypted PEM keys and plain `ws://`/`http://` transport
+by default. Identity binding, secure key storage, TLS deployment, trust-on-first-use
+handling, file-upload hardening, and a formal security review are outside the
+project scope. Do not use it for sensitive or production communication.
 
-## Table of Contents
+Legacy course code that accessed local sensitive files has been removed from the
+public tree and Git history. The remaining code should still be treated as an
+educational prototype.
 
-- [OLAF/Neighbourhood Protocol v1.1.1 Chat Server](#olafneighbourhood-protocol-v111-chat-server)
-    - [By Group 6:](#by-group-6)
-  - [Introduction](#introduction)
-  - [Features](#features)
-  - [Table of Contents](#table-of-contents)
-  - [Installation](#installation)
-    - [Prerequisites](#prerequisites)
-    - [Install Dependencies](#install-dependencies)
-  - [Usage](#usage)
-    - [Starting the Server](#starting-the-server)
-    - [Starting the Clients](#starting-the-clients)
-    - [Client-Server Communication](#client-server-communication)
-    - [Network Topology Examples](#network-topology-examples)
-      - [Simple Neighborhood](#simple-neighborhood)
-      - [Complex Neighborhood](#complex-neighborhood)
-    - [Commands](#commands)
-    - [Example Client Usage](#example-client-usage)
-  - [API Endpoints](#api-endpoints)
-    - [Upload a File](#upload-a-file)
-    - [Download a File](#download-a-file)
-  - [Protocol Overview](#protocol-overview)
-    - [Message Structure](#message-structure)
-    - [Encryption Details](#encryption-details)
-  - [Logging](#logging)
+## Quick start
 
-## Installation
-
-### Prerequisites
-
-Ensure you have the following installed:
-
-- **Python 3.8+**
-- **pip** (Python package installer)
-
-### Install Dependencies
-
-1. Clone the repository:
-    ```bash
-    git clone https://github.com/xioFelix/UofA_2024_SP_OlafChat.git
-    cd UofA_2024_SP_OlafChat
-    ```
-
-2. Install the required Python packages:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-## Usage
-
-### Starting the Server
-
-Run the servers using the following command:
+Requires Python 3.8+.
 
 ```bash
-python -m server.server --host 0.0.0.0 --port 8000 --neighbors ws://127.0.0.1:8001
-```
-```bash
-python -m server.server --host 0.0.0.0 --port 8001 --neighbors ws://127.0.0.1:8000
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-**Please note:** When starting the server, you only need to specify the web socket port manually. The http port will be automatically increased by 100 based on the web port. For example, if you start the server on port <u>8000</u>, the web socket port is <u>8000</u> and the http port is <u>8100</u>.
-
-### Starting the Clients
+Start two neighbouring servers:
 
 ```bash
-python -m client.client  --host 127.0.0.1 --port 8000
+python -m server.server --host 127.0.0.1 --port 8000 --neighbors ws://127.0.0.1:8001
+python -m server.server --host 127.0.0.1 --port 8001 --neighbors ws://127.0.0.1:8000
 ```
+
+Then connect clients in separate terminals:
+
 ```bash
-python -m client.client  --host 127.0.0.1 --port 8001
+python -m client.client --host 127.0.0.1 --port 8000
+python -m client.client --host 127.0.0.1 --port 8001
 ```
 
-### Client-Server Communication
+Each server exposes its WebSocket port and an HTTP file-transfer port at
+`websocket_port + 100`.
 
-Each client connects to one server at a time, which becomes their **home server**. The server forwards messages to other connected servers and clients. Clients can only communicate with users on their home server or users on servers directly connected to their home server.
+## Commands
 
-Messages between clients are encrypted using a combination of RSA and AES-GCM encryption to ensure end-to-end security.
+- `/list` — list online users known to the neighbourhood.
+- `/broadcast <message>` — broadcast to users in the neighbourhood.
+- `/msg <user1,user2> <message>` — send a private or group message.
+- `/get_public_key <username>` — request a user's public key.
+- `/upload <path>` and `/download <url>` — transfer a file through the home
+  server.
 
-### Network Topology Examples
-
-#### Simple Neighborhood
-In this example, each client is directly connected to the same or directly connected servers. All clients can communicate with one another.
+## Protocol sketch
 
 ```mermaid
-graph LR;
-subgraph connections
-A[ClientA] -.-> B((Server1));
-C[ClientB] -.-> B;
-B <--> D((Server2));
-E[ClientC] -.-> D;
-end
+flowchart LR
+  A[Client A] --> S1[Home server 1]
+  B[Client B] --> S2[Home server 2]
+  S1 <--> S2
+  A -. encrypted payload .-> B
 ```
 
-#### Complex Neighborhood
-Here, all clients can communicate, either by being on the same server or through interconnected servers in the neighborhood.
+Messages use an RSA-PSS signature over the payload and counter. Private/group
+payloads use a fresh 256-bit AES key with GCM authentication, and that key is
+wrapped for each recipient using RSA-OAEP/SHA-256.
 
-```mermaid
-graph LR;
-subgraph connections
-A[ClientA] -.-> B((Server1));
-C[ClientB] -.-> B;
-B <--> D((Server2));
-E[ClientC] -.-> D;
-D <--> F((Server3));
-G[ClientD] -.-> F;
-H[ClientE] -.-> F;
-D <--> I((Server4));
-J[ClientF] -.-> I;
-K[ClientG] -.-> I;
-B <--> F;
-B <--> I;
-F <--> I;
-end
-```
+## Team attribution
 
-### Commands
+Group 6: Zhihan Yang, Xiao Liu, Danyang Zhang, and Yuzhe Zhang. See Git history
+and the original requirements under `Requirements/` for the project record.
 
-Once connected, clients can use the following commands:
+## 中文说明
 
-- **/list**: Show online users across all servers.
-- **/broadcast `<message>`**: Send a broadcast message to all users in the neighborhood.
-- **/msg `<username>` `<message>`**: Send a private message to a specific user.
-- **/get_public_key `<username>`**: Retrieve the public key of a specific user.
-- **/upload `<filepath>`**: Upload a file to the server.
-- **/download `<file_url>`**: Download a file from the server.
-- **/kick `<username>`**: Kick a user out of the chat (Admin Only - Backdoor).
-- **/secret**: Execute a hidden secret backdoor functionality.
+本项目是阿德莱德大学四人团队完成的 OLAF/Neighbourhood 协议原型。客户端通过
+WebSocket 连接各自的 home server，服务器组成邻居拓扑，并支持私聊、群聊、
+广播、用户同步和文件传输。代码实现了 RSA-2048 OAEP、RSA-PSS/SHA-256、
+AES-256-GCM 与单调计数器防重放机制。
 
-### Example Client Usage
-
-The client establishes a WebSocket connection and communicates using the server’s public key for encryption.
-
-Example flow:
-1. The client sends a `hello` message with their public key.
-2. The server responds with an acknowledgment and the list of connected clients.
-3. Clients can then send encrypted messages to each other through their home server.
-
-## API Endpoints
-
-The server exposes HTTP endpoints for file uploads and downloads.
-
-### Upload a File
-
-```bash
-POST /api/upload
-```
-
-- **Request**: Send a multipart form-data request with a file field containing the file.
-- **Response**: Returns the URL to access the uploaded file.
-
-Example:
-
-```bash
-curl -F "file=@/path/to/yourfile.txt" http://localhost:8000/api/upload
-```
-
-### Download a File
-
-```bash
-GET /files/<filename>
-```
-
-- **Request**: Use the filename returned from the upload response.
-- **Response**: The file will be returned as a binary stream.
-
-Example:
-
-```bash
-curl -O http://localhost:8000/files/yourfile.txt
-```
-
-## Protocol Overview
-
-The protocol follows the **OLAF/Neighborhood Protocol**, where clients connect to a single server and servers form neighborhoods to facilitate communication.
-
-### Message Structure
-
-All messages follow the below structure:
-
-```JSON
-{
-    "type": "signed_data",
-    "data": {  },
-    "counter": 12345,
-    "signature": "<Base64 signature of data + counter>"
-}
-```
-
-- **counter**: A monotonically increasing integer that prevents replay attacks.
-- **signature**: Generated using RSA-PSS with SHA-256 and ensures the integrity of the message.
-
-### Encryption Details
-
-- **RSA**: Used for key exchange and message signing. Key length: 2048 bits.
-- **AES-GCM**: Used for encrypting message payloads. AES-256 is the default key size.
-- **Message Signing**: All messages are signed using RSA-PSS with SHA-256 to ensure authenticity and prevent tampering.
-
-Messages include a counter that prevents replay attacks by ensuring that each message has a unique incrementing value.
-
-## Logging
-
-The logging system uses the following levels:
-- **`Trace`:** The lowest level of logging. When enabled, it will display all debug statements, but may contain a lot of information that is not of interest.
-- **`Debug`:** Debug mode, which usually outputs some of the functions that we are most concerned about at the moment as needed.
-- **`Info`:** The mode seen by the user, only necessary information is output, and no debug statements will appear.
-
-By default, the server outputs `INFO` level logs to the console, including connections, disconnections, and message flow. For more detailed logs, you can enable `DEBUG` or `TRACE` level logging:
-
+它是教学用途的协议实现，并未经过独立安全审计；默认传输、密钥存储和文件上传
+也不满足生产环境要求。公开历史中原有的本地敏感文件访问模块已移除，简历中应
+描述为“加密通信协议原型”，不应称为生产级安全聊天系统。

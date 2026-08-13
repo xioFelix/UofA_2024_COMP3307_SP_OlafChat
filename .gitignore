@@ -245,3 +245,7 @@ poetry.toml
 pyrightconfig.json
 /.vscode
 /OLAFChat
+*_private_key.pem
+server_private_key.pem
+file_storage/
+*_downloads/
